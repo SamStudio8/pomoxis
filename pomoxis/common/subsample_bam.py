@@ -25,8 +25,17 @@ def main():
         help='Target depth.')
     parser.add_argument('-o', '--output_prefix', default='sub_sampled',
         help='Output prefix')
+    parser.add_argument('--output-anyway', action='store_true',
+        help='Output a region even if the reads were of insufficient depth.')
+    parser.add_argument('--output-override', default=None,
+        help='Specify a path to override generation of one BAM per region')
+
+    #iparser = parser.add_mutually_exclusive_group()
+    #iarser.add_argument('--no-index', action='store_true',
+    #    help='Stream SAM or BAM input without index (e.g. via stdin)')
     parser.add_argument('-r', '--regions', nargs='+',
-        help='Only process given regions.')
+        help='Only process given regions (requires index).')
+
     parser.add_argument('-p', '--profile', type=int, default=1000,
         help='Stride in genomic coordinates for depth profile.')
     parser.add_argument('-O', '--orientation', choices=['fwd', 'rev'],
@@ -76,9 +85,15 @@ def main():
         worker = functools.partial(subsample_region_uniformly, args=args)
 
     enough_depth = []
+    reads = []
     with ProcessPoolExecutor(max_workers=args.threads) as executor:
         for res in executor.map(worker, regions):
-            enough_depth.append(res)
+            enough_depth.append(res[0])
+            reads.extend(res[1])
+
+    if args.output_override:
+        _write_bam(args.bam, '', regions, reads, override=args.output_override)
+        #_write_coverage(prefix, '', '', args.profile)
 
     if args.any_fail and not all(enough_depth):
         raise RuntimeError('Insufficient read coverage for one or more requested regions.')
@@ -89,6 +104,8 @@ def main():
 def subsample_region_proportionally(region, args):
     if args.quality is not None or args.coverage is not None or args.accuracy is not None:
         raise NotImplemented('Read filtering is not currently supported for proportion subsampling')
+    if args.output_override:
+        raise NotImplemented('Single output is not currently supported for proportion subsampling')
 
     logger = logging.getLogger(region.ref_name)
     coverage_summary = coverage_summary_of_region(region, args.bam, args.stride)
@@ -132,7 +149,7 @@ def subsample_region_proportionally(region, args):
         _write_coverage(prefix, region, coverage, args.profile)
         logger.info('Processed {}X: {} reads ({:.2f} %).'.format(target, n_reads, 100 * fraction))
 
-    return found_enough_depth
+    return found_enough_depth, []
 
 
 def filter_read(r, bam, args, logger):
@@ -173,13 +190,18 @@ def subsample_region_uniformly(region, args):
     tree = IntervalTree()
     with pysam.AlignmentFile(args.bam) as bam:
         ref_lengths = dict(zip(bam.references, bam.lengths))
-        for r in bam.fetch(region.ref_name, region.start, region.end):
+        for i, r in enumerate(bam.fetch(region.ref_name, region.start, region.end)):
             if filter_read(r, bam, args, logger):
                 continue
             # trim reads to region
-            tree.add(Interval(
-                max(r.reference_start, region.start), min(r.reference_end, region.end),
-                r.query_name))
+            if args.output_override:
+                tree.add(Interval(
+                    max(r.reference_start, region.start), min(r.reference_end, region.end),
+                    r.query_name+'_'+str(i)))
+            else:
+                tree.add(Interval(
+                    max(r.reference_start, region.start), min(r.reference_end, region.end),
+                    r.query_name))
 
     logger.info('Starting pileup.')
     coverage = np.zeros(region.end - region.start, dtype=np.uint16)
@@ -211,8 +233,10 @@ def subsample_region_uniformly(region, args):
         if median_depth >= target:
             logger.info("Hit target depth {}.".format(target))
             prefix = '{}_{}X'.format(args.output_prefix, target)
-            _write_bam(args.bam, prefix, region, reads)
-            _write_coverage(prefix, region, coverage, args.profile)
+
+            if not args.output_override:
+                _write_bam(args.bam, prefix, region, reads)
+                _write_coverage(prefix, region, coverage, args.profile)
             try:
                 target = next(targets)
             except StopIteration:
@@ -235,7 +259,11 @@ def subsample_region_uniformly(region, args):
         else:
             it_no_change == 0
         last_depth = median_depth
-    return found_enough_depth
+
+        if not found_enough_depth and not args.output_anyway:
+            # Reset reads if we don't want low depth regions
+            reads = []
+    return found_enough_depth, reads
 
 
 def _nearest_overlapping_point(src, point):
@@ -255,20 +283,32 @@ def _nearest_overlapping_point(src, point):
     return items[0]
 
 
-def _write_bam(bam, prefix, region, sequences):
+def _write_bam(bam, prefix, region, sequences, override=False):
     # filtered bam
     sequences = set(sequences)
     taken = set()
-    output = '{}_{}.{}'.format(prefix, region.ref_name, os.path.basename(bam))
-    src_bam = pysam.AlignmentFile(bam, "rb")
-    out_bam = pysam.AlignmentFile(output, "wb", template=src_bam)
-    for read in src_bam.fetch(region.ref_name, region.start, region.end):
-        if read.query_name in sequences and read.query_name not in taken:
-            out_bam.write(read)
-            taken.add(read.query_name)
+
+    if override:
+        output = override
+        src_bam = pysam.AlignmentFile(bam, "rb")
+        out_bam = pysam.AlignmentFile(output, "wb", template=src_bam)
+        for r in region:
+            for i, read in enumerate(src_bam.fetch(r.ref_name, r.start, r.end)):
+                if '%s_%d' % (read.query_name, i) in sequences:
+                    out_bam.write(read)
+    else:
+        output = '{}_{}.{}'.format(prefix, region.ref_name, os.path.basename(bam))
+        src_bam = pysam.AlignmentFile(bam, "rb")
+        out_bam = pysam.AlignmentFile(output, "wb", template=src_bam)
+        for read in src_bam.fetch(region.ref_name, region.start, region.end):
+            if read.query_name in sequences and read.query_name not in taken:
+                out_bam.write(read)
+                taken.add(read.query_name)
+
     src_bam.close()
     out_bam.close()
-    pysam.index(output)
+    if override != '-':
+        pysam.index(output)
 
 
 def _write_coverage(prefix, region, coverage, profile):
