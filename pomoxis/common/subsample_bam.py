@@ -25,23 +25,22 @@ def main():
         help='Target depth.')
     parser.add_argument('-o', '--output_prefix', default='sub_sampled',
         help='Output prefix')
-    parser.add_argument('--output-anyway', action='store_true',
-        help='Output a region even if the reads were of insufficient depth.')
     parser.add_argument('--output-override', default=None,
         help='Specify a path to override generation of one BAM per region')
 
-    #iparser = parser.add_mutually_exclusive_group()
-    #iarser.add_argument('--no-index', action='store_true',
-    #    help='Stream SAM or BAM input without index (e.g. via stdin)')
-    parser.add_argument('-r', '--regions', nargs='+',
+    iparser = parser.add_mutually_exclusive_group()
+    jparser = iparser.add_mutually_exclusive_group()
+    jparser.add_argument('-t', '--threads', type=int, default=-1,
+        help='Number of threads to use.')
+    #jparser.add_argument('--no-index', action='store_true',
+    #    help='Stream SAM or BAM input without index (e.g. via stdin), only supports one thread')
+    iparser.add_argument('-r', '--regions', nargs='+',
         help='Only process given regions (requires index).')
 
     parser.add_argument('-p', '--profile', type=int, default=1000,
         help='Stride in genomic coordinates for depth profile.')
     parser.add_argument('-O', '--orientation', choices=['fwd', 'rev'],
         help='Sample only forward or reverse reads.')
-    parser.add_argument('-t', '--threads', type=int, default=-1,
-        help='Number of threads to use.')
     parser.add_argument('-q', '--quality', type=float,
         help='Filter reads by mean qscore.')
     parser.add_argument('-a', '--accuracy', type=float,
@@ -54,6 +53,8 @@ def main():
         help='Exit with an error if any region has insufficient coverage.')
     eparser.add_argument('--all_fail', action='store_true',
         help='Exit with an error if all regions have insufficient coverage.')
+    eparser.add_argument('--output-anyway', action='store_true',
+        help='Output a region even if the reads were of insufficient depth.')
 
     uparser = parser.add_argument_group('Uniform sampling options')
     uparser.add_argument('-x', '--patience', default=5, type=int,
