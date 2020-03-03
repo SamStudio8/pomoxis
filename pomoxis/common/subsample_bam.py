@@ -1,5 +1,7 @@
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Process, Queue, Array
+
 import functools
 import logging
 import multiprocessing
@@ -8,7 +10,7 @@ import os
 from intervaltree import IntervalTree, Interval
 import numpy as np
 import pysam
-
+from random import sample
 
 from pomoxis.common.util import parse_regions, Region
 from pomoxis.common.coverage_from_bam import coverage_summary_of_region
@@ -27,6 +29,10 @@ def main():
         help='Output prefix')
     parser.add_argument('--output-override', default=None,
         help='Specify a path to override generation of one BAM per region')
+    parser.add_argument('--output-fastq', default=None,
+        help='Create an additional file containing the query_name of subsampled reads.\nRequires --output-override.')
+    parser.add_argument('--output-fasta', default=None,
+        help='Create an additional file containing the query_name of subsampled reads.\nRequires --output-override.')
 
     iparser = parser.add_mutually_exclusive_group()
     jparser = iparser.add_mutually_exclusive_group()
@@ -80,80 +86,91 @@ def main():
         else:
             regions = [Region(ref_name=r, start=0, end=ref_lengths[r]) for r in bam.references]
 
-    if args.proportional:
-        worker = functools.partial(subsample_region_proportionally, args=args)
-    else:
-        worker = functools.partial(subsample_region_uniformly, args=args)
+    #if args.proportional:
+    #    worker = functools.partial(subsample_region_proportionally, args=args)
+    #else:
+    #    worker = functools.partial(subsample_region_uniformly, args=args)
+
+    src_bam = pysam.AlignmentFile(args.bam, "rb")
+    out_bam = pysam.AlignmentFile('-', "wh", template=src_bam)
+    src_bam.close()
 
     enough_depth = []
     reads = []
-    with ProcessPoolExecutor(max_workers=args.threads) as executor:
-        for res in executor.map(worker, regions):
-            enough_depth.append(res[0])
-            reads.extend(res[1])
+    #with ProcessPoolExecutor(max_workers=args.threads) as executor:
+    #    for res in executor.map(worker, regions):
+    #        enough_depth.append(res[0])
+    #        reads.extend(res[1])
+    work_queue = Queue() 
+    processes = []
 
-    if args.output_override:
-        _write_bam(args.bam, '', regions, reads, override=args.output_override)
-        #_write_coverage(prefix, '', '', args.profile)
+    #manager = multiprocessing.Manager()
+    #return_queue = manager.dict()
+    return_queue = Queue()
+    for _ in range(args.threads):
+        p = Process(target=subsample_region_uniformly, args=(work_queue,return_queue,args))
+        processes.append(p)
+    p = Process(target=spew_reads, args=(return_queue,args))
+    processes.append(p)
+
+    for p in processes:
+        p.start()
+
+    for region in regions:
+        work_queue.put({"region": region})
+
+    for _ in range(args.threads):
+        work_queue.put(None)
+
+    # Wait for processes to complete work
+    for p in processes:
+        p.join()
+
+    logger = logging.getLogger()
+    logger.info("Pulling reads back together")
+    out_bam.close()
+
+    #if args.output_override:
+    #    _write_bam(args.bam, '', regions, return_queue, override=args.output_override, override_fastq=args.output_fastq)
+    #    #_write_coverage(prefix, '', '', args.profile)
 
     if args.any_fail and not all(enough_depth):
         raise RuntimeError('Insufficient read coverage for one or more requested regions.')
     if args.all_fail and all([not x for x in enough_depth]):
         raise RuntimeError('Insufficient read coverage for all requested regions.')
 
+def spew_reads(return_q, args):
+    if args.output_fastq:
+        ofq_fh = open(args.output_fastq, 'w')
+    if args.output_fasta:
+        ofa_fh = open(args.output_fasta, 'w')
+    written = 0
+    dead = 0
 
-def subsample_region_proportionally(region, args):
-    if args.quality is not None or args.coverage is not None or args.accuracy is not None:
-        raise NotImplemented('Read filtering is not currently supported for proportion subsampling')
-    if args.output_override:
-        raise NotImplemented('Single output is not currently supported for proportion subsampling')
+    while True:
+        read = return_q.get()
+        if read is None:
+            dead += 1
+            if dead == args.threads:
+                return None
+            continue
 
-    logger = logging.getLogger(region.ref_name)
-    coverage_summary = coverage_summary_of_region(region, args.bam, args.stride)
-    col = 'depth_{}'.format(args.orientation) if args.orientation is not None else 'depth'
-    median_coverage = coverage_summary[col].T['50%']
-    with pysam.AlignmentFile(args.bam) as bam:
-        def _read_iter():
-            for r in bam.fetch(region.ref_name, region.start, region.end):
-                if not filter_read(r, bam, args, logger):
-                    yield r
+        written += 1
+        if args.output_fastq:
+            fields = read.split()
+            ofq_fh.write("@%s\n%s\n+\n%s\n" % (fields[0], read.split()[9], read.split()[10]))
+        if args.output_fasta:
+            fields = read.split()
+            ofa_fh.write(">%s\n%s\n" % (fields[0], read.split()[9]))
+        print(read)
 
-        reads = _read_iter()
-        # query names cannot be longer than 251
-        dtype=[('name', 'U251'), ('start', int),('end',  int)]
-        read_data = np.fromiter(
-            ((r.query_name, r.reference_start, r.reference_end) for r in reads),
-            dtype=dtype
-        )
-
-    targets = sorted(args.depth)
-    found_enough_depth = True
-
-    coverage = np.zeros(region.end - region.start, dtype=np.uint16)
-    if args.seed is not None:
-        np.random.seed(args.seed)
-
-    for target in targets:
-        if target > median_coverage:
-            msg = 'Target depth {} exceeds median coverage {}, skipping this depth and higher depths.'
-            logger.info(msg.format(target, median_coverage))
-            found_enough_depth = False
-            break
-        fraction = target / median_coverage
-        n_reads = int(round(fraction * len(read_data), 0))
-        target_reads = np.random.choice(read_data, n_reads, replace=False)
-        prefix = '{}_{}X'.format(args.output_prefix, target)
-        _write_bam(args.bam, prefix, region, target_reads['name'])
-        coverage.fill(0.0)  # reset coverage for each target depth
-        for read in target_reads:
-            coverage[read['start'] - region.start:read['end'] - region.start] += 1
-        _write_coverage(prefix, region, coverage, args.profile)
-        logger.info('Processed {}X: {} reads ({:.2f} %).'.format(target, n_reads, 100 * fraction))
-
-    return found_enough_depth, []
+    if args.output_fastq:
+        ofq_fh.close()
+    if args.output_fasta:
+        ofa_fh.close()
 
 
-def filter_read(r, bam, args, logger):
+def filter_read(r, args):
     """Decide whether a read should be filtered out, returning a bool"""
 
     # primary alignments
@@ -169,105 +186,81 @@ def filter_read(r, bam, args, logger):
     if args.quality is not None:
         mean_q = np.mean(r.query_qualities)
         if mean_q < args.quality:
-            logger.debug("Filtering {} by quality ({:.2f}).".format(r.query_name, mean_q))
             return True
 
-    # filter accuracy or alignment coverage
-    if args.accuracy is not None or args.coverage is not None:
-        stats = stats_from_aligned_read(r, bam.references, bam.lengths)
-        if args.accuracy is not None and stats['acc'] < args.accuracy:
-            logger.info("Filtering {} by accuracy ({:.2f}).".format(r.query_name, stats['acc']))
-            return True
-        if args.coverage is not None and stats['coverage'] < args.coverage:
-            logger.info("Filtering {} by coverage ({:.2f}).".format(r.query_name, stats['coverage']))
-            return True
     # don't filter
     return False
 
 
-def subsample_region_uniformly(region, args):
-    logger = logging.getLogger(region.ref_name)
-    logger.info("Building interval tree.")
-    tree = IntervalTree()
-    with pysam.AlignmentFile(args.bam) as bam:
-        ref_lengths = dict(zip(bam.references, bam.lengths))
-        for i, r in enumerate(bam.fetch(region.ref_name, region.start, region.end)):
-            if filter_read(r, bam, args, logger):
-                continue
-            # trim reads to region
-            if args.output_override:
-                tree.add(Interval(
-                    max(r.reference_start, region.start), min(r.reference_end, region.end),
-                    r.query_name+'_'+str(i)))
-            else:
-                tree.add(Interval(
-                    max(r.reference_start, region.start), min(r.reference_end, region.end),
-                    r.query_name))
-
-    logger.info('Starting pileup.')
-    coverage = np.zeros(region.end - region.start, dtype=np.uint16)
-    reads = set()
-    n_reads = 0
-    iteration = 0
-    it_no_change = 0
-    last_depth = 0
-    targets = iter(sorted(args.depth))
-    target = next(targets)
-    found_enough_depth = True
+def subsample_region_uniformly(work_q, return_q, args):
     while True:
+        work = work_q.get()
+        if work is None:
+            return_q.put(None)
+            return
+        else:
+            region = work["region"]
+
+        logger = logging.getLogger(region.ref_name)
+        logger.info("PULLED %s FROM QUEUE" % region.ref_name)
+
+        bam = pysam.AlignmentFile(args.bam)
+        coverage = np.zeros(region.end - region.start, dtype=np.uint16)
+
+        # begin
+        #tracks = []
+        reads = 0
+        track_ends = {}
+        #pileups = bam.pileup(contig=region.ref_name)
+        #pileupcolumn = next(pileups); cursor = 0
+        #TODO I want to bring this back to get a better starting read set
+
+        #open_reads = [x for x in pileupcolumn.pileups if (x.alignment.reference_start < 100)]
+        #for i,r in enumerate(sample(open_reads, args.depth[0])):
+        #    tracks.append( [r.alignment] )
+        #    track_ends[i] = r.alignment.reference_end
+        #    coverage[r.alignment.reference_start : r.alignment.reference_end] += 1
+        for i in range(args.depth[0]):
+            #tracks.append( [] )
+            track_ends[i] = 0
         cursor = 0
-        while cursor < ref_lengths[region.ref_name]:
-            read = _nearest_overlapping_point(tree, cursor)
-            if read is None:
-                cursor += args.stride
-            else:
-                reads.add(read.data)
-                cursor = read.end
-                coverage[read.begin - region.start:read.end - region.start] += 1
-                tree.remove(read)
-        iteration += 1
+
+        #return_q[region.ref_name] = {}
+        for read in bam.fetch(contig=region.ref_name):
+            # TODO We want to get some randomness in here
+            if read.reference_start > cursor:
+                if filter_read(read, args):
+                    continue
+                this_track = [i for i in track_ends if track_ends[i] == cursor][0] # select one if they have same start
+                #tracks[this_track].append(read.query_name+'@'+str(read.reference_start))
+                #return_q[region.ref_name][read.query_name+'@'+str(read.reference_start)] = 1
+                return_q.put(read.to_string())
+                #reads.append(str(read))
+                track_ends[this_track] = read.reference_end
+                #out_bam.write(read)
+                coverage[read.reference_start : read.reference_end] += 1
+                reads += 1
+                #for t in this_tracks:
+                #    for i, r in enumerate(sample(tree.at(cursor), len(this_tracks))):
+                #        tracks[this_tracks[i]].append(r)
+                #        track_ends[this_tracks[i]] = r.reference_end
+                #        #out_bam.write(r.alignment)
+                #        coverage[r.reference_start : r.reference_end] += 1
+                cursor = min(track_ends.values()) 
+
+        #reads = []
+        #[reads.extend(track) for track in tracks]
+        #return_q.extend(reads)
+
         median_depth = np.median(coverage)
         stdv_depth = np.std(coverage)
-        logger.debug(u'Iteration {}. reads: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(
-            iteration, len(reads), median_depth, stdv_depth))
-        # output when we hit a target
-        if median_depth >= target:
-            logger.info("Hit target depth {}.".format(target))
-            prefix = '{}_{}X'.format(args.output_prefix, target)
+        logger.info(u'reads: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(
+            reads, median_depth, stdv_depth))
 
-            if not args.output_override:
-                _write_bam(args.bam, prefix, region, reads)
-                _write_coverage(prefix, region, coverage, args.profile)
-            try:
-                target = next(targets)
-            except StopIteration:
-                break
-        # exit if nothing happened this iteration
-        if n_reads == len(reads):
-            logger.warn("No reads added, finishing pileup.")
-            found_enough_depth = False
-            break
-        n_reads = len(reads)
-        # or if no change in depth
-        if median_depth == last_depth:
-            it_no_change += 1
-            if it_no_change == args.patience:
-                logging.warn("Coverage not increased for {} iterations, finishing pileup.".format(
-                    args.patience
-                ))
-                found_enough_depth = False
-                break
-        else:
-            it_no_change == 0
-        last_depth = median_depth
-
-        if not found_enough_depth and not args.output_anyway:
-            # Reset reads if we don't want low depth regions
-            reads = []
-    return found_enough_depth, reads
+        logger.info("PUSHED %s TO QUEUE" % region.ref_name)
 
 
-def _nearest_overlapping_point(src, point):
+def _nearest_overlapping_point(src, point, step, lengths={}):
     """Find the interval with the closest start point to a given point.
 
     :param src: IntervalTree instance.
@@ -277,27 +270,51 @@ def _nearest_overlapping_point(src, point):
 
     """
     items = src.at(point)
-    if len(items) == 0:
-        return None
-    items = sorted(items, key=lambda x: x.end - x.begin, reverse=True)
-    items.sort(key=lambda x: abs(x.begin - point))
-    return items[0]
+    #items = src.envelop(point, point+step)
+    if len(items) > 0:
+        return next(iter(items))
+
+    #if len(items) == 0:
+    #    return None
+    #
+    #if lengths:
+    #    pass
+    #    #items = sorted(items, key=lambda x: lengths[x.data], reverse=True) # this actually codes a preference for longest reads first, which we might not want
+    #else:
+    #    items = sorted(items, key=lambda x: x.end - x.begin, reverse=True)
+    #items.sort(key=lambda x: abs(x.begin - point))
+    #return items[0]
 
 
-def _write_bam(bam, prefix, region, sequences, override=False):
+def _write_bam(bam, prefix, region, sequences, override=False, override_fastq=None):
     # filtered bam
-    sequences = set(sequences)
-    taken = set()
 
+    logger = logging.getLogger()
     if override:
+        if override_fastq:
+            ofq_fh = open(override_fastq, 'w')
+
+        logger.info("Writing BAM.")
+        written = 0
         output = override
         src_bam = pysam.AlignmentFile(bam, "rb")
         out_bam = pysam.AlignmentFile(output, "wb", template=src_bam)
         for r in region:
-            for i, read in enumerate(src_bam.fetch(r.ref_name, r.start, r.end)):
-                if '%s_%d' % (read.query_name, i) in sequences:
+            for read in src_bam.fetch(contig=r.ref_name):
+                if '%s@%d' % (read.query_name, read.reference_start) in sequences[read.reference_name]:
                     out_bam.write(read)
+                    written+=1
+                    if override_fastq:
+                        ofq_fh.write("%s\n" % read.query_name)
+
+                    if written % 10000 == 0:
+                        logger.info("%.2f written..." % (written/len(sequences)))
+
+        if override_fastq:
+            ofq_fh.close()
     else:
+        sequences = set(sequences)
+        taken = set()
         output = '{}_{}.{}'.format(prefix, region.ref_name, os.path.basename(bam))
         src_bam = pysam.AlignmentFile(bam, "rb")
         out_bam = pysam.AlignmentFile(output, "wb", template=src_bam)
