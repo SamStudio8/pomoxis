@@ -2,7 +2,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 import functools
 import logging
-import multiprocessing
+import multiprocessing import cpu_count, Process, Queue, Array
 import os
 
 from intervaltree import IntervalTree, Interval
@@ -58,7 +58,7 @@ def main():
 
     args = parser.parse_args()
     if args.threads == -1:
-        args.threads = multiprocessing.cpu_count()
+        args.threads = cpu_count()
 
     with pysam.AlignmentFile(args.bam) as bam:
         ref_lengths = dict(zip(bam.references, bam.lengths))
