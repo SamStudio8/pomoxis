@@ -71,24 +71,28 @@ def main():
 
     enough_depth = []
 
+    processes = []
     work_queue = Queue()
     return_queue = Queue()
-    processes = []
 
     for _ in range(args.threads):
         p = Process(target=subsample_region_uniformally, args=(work_queue, return_queue, args))
         process.append(p)
     for p in processes:
         p.start()
-        
+    #p = Process(target=spew_reads, args=(return_queue, args))
+    #processes.append(p)
+
     for region in regions:
         work_queue.put({
             "region": region,
         })
 
+    # Add sentinels to queue
     for _ in range(args.threads):
         work_queue.put(None)
 
+    # Wait for threads to finish processing regions
     for p in processes:
         p.join()
 
@@ -136,75 +140,84 @@ def filter_read(r, bam, args, logger):
     return False
 
 
-def subsample_region_uniformly(region, args):
-    logger = logging.getLogger(region.ref_name)
-    logger.info("Building interval tree.")
-    tree = IntervalTree()
-    with pysam.AlignmentFile(args.bam) as bam:
-        ref_lengths = dict(zip(bam.references, bam.lengths))
-        for r in bam.fetch(region.ref_name, region.start, region.end):
-            if filter_read(r, bam, args, logger):
-                continue
-            # trim reads to region
-            tree.add(Interval(
-                max(r.reference_start, region.start), min(r.reference_end, region.end),
-                r.query_name))
-
-    logger.info('Starting pileup.')
-    coverage = np.zeros(region.end - region.start, dtype=np.uint16)
-    reads = set()
-    n_reads = 0
-    iteration = 0
-    it_no_change = 0
-    last_depth = 0
-    targets = iter(sorted(args.depth))
-    target = next(targets)
-    found_enough_depth = True
+def subsample_region_uniformly(work_q, return_q, args):
     while True:
-        cursor = 0
-        while cursor < ref_lengths[region.ref_name]:
-            read = _nearest_overlapping_point(tree, cursor)
-            if read is None:
-                cursor += args.stride
-            else:
-                reads.add(read.data)
-                cursor = read.end
-                coverage[read.begin - region.start:read.end - region.start] += 1
-                tree.remove(read)
-        iteration += 1
-        median_depth = np.median(coverage)
-        stdv_depth = np.std(coverage)
-        logger.debug(u'Iteration {}. reads: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(
-            iteration, len(reads), median_depth, stdv_depth))
-        # output when we hit a target
-        if median_depth >= target:
-            logger.info("Hit target depth {}.".format(target))
-            prefix = '{}_{}X'.format(args.output_prefix, target)
-            _write_bam(args.bam, prefix, region, reads)
-            _write_coverage(prefix, region, coverage, args.profile)
-            try:
-                target = next(targets)
-            except StopIteration:
-                break
-        # exit if nothing happened this iteration
-        if n_reads == len(reads):
-            logger.warn("No reads added, finishing pileup.")
-            found_enough_depth = False
-            break
-        n_reads = len(reads)
-        # or if no change in depth
-        if median_depth == last_depth:
-            it_no_change += 1
-            if it_no_change == args.patience:
-                logging.warn("Coverage not increased for {} iterations, finishing pileup.".format(
-                    args.patience
-                ))
+        work = work_q.get()
+        if work is None:
+            # If sentinel, push sentinel to return queue and finish
+            return_q.put(None)
+            return
+        else:
+            region = work["region"]
+
+        logger = logging.getLogger(region.ref_name)
+        logger.info("Building interval tree.")
+        tree = IntervalTree()
+        with pysam.AlignmentFile(args.bam) as bam:
+            ref_lengths = dict(zip(bam.references, bam.lengths))
+            for r in bam.fetch(region.ref_name, region.start, region.end):
+                if filter_read(r, bam, args, logger):
+                    continue
+                # trim reads to region
+                tree.add(Interval(
+                    max(r.reference_start, region.start), min(r.reference_end, region.end),
+                    r.query_name))
+
+        logger.info('Starting pileup.')
+        coverage = np.zeros(region.end - region.start, dtype=np.uint16)
+        reads = set()
+        n_reads = 0
+        iteration = 0
+        it_no_change = 0
+        last_depth = 0
+        targets = iter(sorted(args.depth))
+        target = next(targets)
+        found_enough_depth = True
+        while True:
+            cursor = 0
+            while cursor < ref_lengths[region.ref_name]:
+                read = _nearest_overlapping_point(tree, cursor)
+                if read is None:
+                    cursor += args.stride
+                else:
+                    reads.add(read.data)
+                    cursor = read.end
+                    coverage[read.begin - region.start:read.end - region.start] += 1
+                    tree.remove(read)
+            iteration += 1
+            median_depth = np.median(coverage)
+            stdv_depth = np.std(coverage)
+            logger.debug(u'Iteration {}. reads: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(
+                iteration, len(reads), median_depth, stdv_depth))
+            # output when we hit a target
+            if median_depth >= target:
+                logger.info("Hit target depth {}.".format(target))
+                prefix = '{}_{}X'.format(args.output_prefix, target)
+                _write_bam(args.bam, prefix, region, reads)
+                _write_coverage(prefix, region, coverage, args.profile)
+                try:
+                    target = next(targets)
+                except StopIteration:
+                    break
+            # exit if nothing happened this iteration
+            if n_reads == len(reads):
+                logger.warn("No reads added, finishing pileup.")
                 found_enough_depth = False
                 break
-        else:
-            it_no_change == 0
-        last_depth = median_depth
-    return found_enough_depth
+            n_reads = len(reads)
+            # or if no change in depth
+            if median_depth == last_depth:
+                it_no_change += 1
+                if it_no_change == args.patience:
+                    logging.warn("Coverage not increased for {} iterations, finishing pileup.".format(
+                        args.patience
+                    ))
+                    found_enough_depth = False
+                    break
+            else:
+                it_no_change == 0
+            last_depth = median_depth
+        return found_enough_depth
 
 
 def _nearest_overlapping_point(src, point):
