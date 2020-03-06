@@ -1,5 +1,4 @@
 import argparse
-from concurrent.futures import ProcessPoolExecutor
 import functools
 import logging
 import multiprocessing import cpu_count, Process, Queue, Array
@@ -71,9 +70,30 @@ def main():
     worker = functools.partial(subsample_region_uniformly, args=args)
 
     enough_depth = []
-    with ProcessPoolExecutor(max_workers=args.threads) as executor:
-        for res in executor.map(worker, regions):
-            enough_depth.append(res)
+
+    work_queue = Queue()
+    return_queue = Queue()
+    processes = []
+
+    for _ in range(args.threads):
+        p = Process(target=subsample_region_uniformally, args=(work_queue, return_queue, args))
+        process.append(p)
+    for p in processes:
+        p.start()
+        
+    for region in regions:
+        work_queue.put({
+            "region": region,
+        })
+
+    for _ in range(args.threads):
+        work_queue.put(None)
+
+    for p in processes:
+        p.join()
+
+
+
 
     if args.any_fail and not all(enough_depth):
         raise RuntimeError('Insufficient read coverage for one or more requested regions.')
