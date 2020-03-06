@@ -1,22 +1,23 @@
 import argparse
+from collections import defaultdict, Counter, namedtuple
 import concurrent.futures
+from functools import partial
 import itertools
 import logging
-import matplotlib; matplotlib.use('Agg', warn=False)  # enforce non-interactive backend
-import numpy as np
+from operator import attrgetter
 import os
-import pandas as pd
-import pysam
+import pickle
 import re
 import unittest
 import warnings
-import yaml
-from collections import defaultdict, Counter, namedtuple
-from functools import partial
-from matplotlib import pyplot as plt
-from operator import attrgetter
 
-from pomoxis.common.util import get_trimmed_pairs, intervaltrees_from_bed
+import matplotlib; matplotlib.use('Agg', warn=False)  # enforce non-interactive backend
+from matplotlib import pyplot as plt
+import numpy as np
+import pandas as pd
+import pysam
+
+from pomoxis.util import get_trimmed_pairs, intervaltrees_from_bed
 
 AlignSeg = namedtuple('AlignSeg', ('rname', 'qname', 'pairs', 'rlen'))
 Error = namedtuple('Error', ('rp', 'rname', 'qp', 'qname', 'ref', 'match', 'read', 'counts', 'klass', 'aggr_klass'))
@@ -556,6 +557,9 @@ def _process_read(bam, read_num, bed_file=None):
     :param bed_file: path to .bed file of regions to include in analysis.
     :returns: result of `_process_seg`.
     """
+    trees = None
+    if bed_file is not None:
+        trees = intervaltrees_from_bed(bed_file)
 
     with pysam.AlignmentFile(bam, 'rb') as bam_obj:
         gen = (r for r in bam_obj)
@@ -565,7 +569,7 @@ def _process_read(bam, read_num, bed_file=None):
             return
 
         if bed_file is not None:
-            tree = intervaltrees_from_bed(bed_file, rec.reference_name)
+            tree = trees[rec.reference_name]
 
             if not tree.overlaps(rec.reference_start, rec.reference_end):
                 #sys.stderr.write('read {} does not overlap with any regions in bedfile\n'.format(rec.query_name))
@@ -639,25 +643,25 @@ def analyze_counts(counts, total_ref_length):
     return df
 
 
-def plot_summary(df, outdir, prefix):
-    """Create a plot showing the Q-score for each error klass if all larger
-    error classes are removed"""
+def plot_summary(df, outdir, prefix, ref_len):
+    """Create a plot showing Q-scores as largest remaining
+    error klass is removed"""
 
     fig, ax = plt.subplots()
     fig.subplots_adjust(left=0.3)
-    err_q = qscore(df['err_rate'].sum())
-    ax.vlines([err_q], 0, 100)
-    y_pos = np.arange(len(df))
-    ax.set_ylabel('Q(Accuracy')
-
-    ax.barh(y_pos, df['remaining_err_rate_q'], align='center', color='green', ecolor='black')
+    y_pos = np.arange(len(df) + 1)
+    no_error_score = -10 * np.log10(1/ref_len)
+    ax.barh(y_pos, df['remaining_err_rate_q'].append(pd.Series(no_error_score)), align='center', color='green', ecolor='black')
     ax.set_xlabel('Q(Accuracy)')
     ax.set_ylabel('Error Class')
     ax.set_ylim((y_pos[0]-0.5, y_pos[-1]+0.5))
     ax.set_yticks(y_pos)
-    ax.set_yticklabels(df['klass'])
+    ax.set_yticklabels(['total error'] + list(df['klass']))
     ax.invert_yaxis()  # labels read top-to-bottom
-    ax.set_title('Overall Q-scores after fixing all larger errors')
+    xstart, xend = ax.get_xlim()
+    ystart, yend = ax.get_ylim()
+    ax.text(xend - 2.25, ystart - 0.25, '+')
+    ax.set_title('Q-score after removing error class')
     fp = os.path.join(outdir, '{}_remaining_errors.png'.format(prefix))
     fig.savefig(fp)
     plt.close()
@@ -686,7 +690,10 @@ def get_aggr_klass(klass):
 
 def main():
     logging.basicConfig(format='[%(asctime)s - %(name)s] %(message)s', datefmt='%H:%M:%S', level=logging.INFO)
-    parser = argparse.ArgumentParser('catalogue_errors')
+    parser = argparse.ArgumentParser(
+        prog='catalogue_errors',
+        description='Create a catalogue of all query errors in a bam.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('bam', help='Input alignments (aligned to ref).')
     parser.add_argument('--bed', default=None, help='.bed file of reference regions to include.')
     parser.add_argument('-t', '--threads', type=int, default=1, help='Number of threads for parallel execution.')
@@ -742,19 +749,6 @@ def main():
                 txt_fh.write(e.read + "\n")
                 txt_fh.write(".\n")
 
-                if 'multi ins' in e.klass or 'multi del' in e.klass:
-                    key = (e.qname, e.rname, e.rp) if 'multi ins' in e.klass else (e.qname, e.rname, e.qp)
-                    if key not in multi_errs:
-                        d = e._asdict()
-                        for k in 'rp', 'qp':
-                            d[k] = helper(d[k])
-                        d['n_ins'] = len(d['counts']['ins'])
-                        d['n_del'] = len(d['counts']['del'])
-                        del d['counts']
-                        multi_errs[key] = d
-                    multi_errs[key]['qp_end'] = helper(e.qp)
-                    multi_errs[key]['rp_end'] = helper(e.rp)
-
     total_counts = Counter()
     aggr_by_ref = {}
     for ref_name, counts in error_count.items():
@@ -766,7 +760,8 @@ def main():
         df = analyze_counts(aggr_by_ref[ref_name], total_ref_length[ref_name])
         fp = os.path.join(args.outdir, '{}_aggr_error_summary.txt'.format(ref_name))
         df.to_csv(fp, sep=_sep_, index=False)
-        plot_summary(df, args.outdir, '{}_aggr'.format(ref_name))
+        plot_summary(df, args.outdir, '{}_aggr'.format(ref_name),
+                     ref_len=total_ref_length[ref_name])
 
         total_counts.update(counts)
 
@@ -778,15 +773,8 @@ def main():
     df = analyze_counts(aggregate_counts, sum(total_ref_length.values()))
     fp = os.path.join(args.outdir, '{}_aggr_error_summary.txt'.format('total'))
     df.to_csv(fp, sep=_sep_, index=False)
-    plot_summary(df, args.outdir, '{}_aggr'.format('total'))
-
-    if len(multi_errs) > 0:
-        multi_err_df = pd.DataFrame([d for d in multi_errs.values()])
-        multi_err_df['q_len'] = multi_err_df['qp_end'] - multi_err_df['qp']
-        multi_err_df['r_len'] = multi_err_df['rp_end'] - multi_err_df['rp']
-        cols=['rname', 'rp', 'qname', 'qp', 'qp_end', 'q_len', 'r_len', 'klass', 'n_ins', 'n_del']
-        output = os.path.join(args.outdir, 'multi_errs.txt')
-        multi_err_df[cols].to_csv(output, sep=_sep_, index=False)
+    plot_summary(df, args.outdir, '{}_aggr'.format('total'),
+                 ref_len=sum(total_ref_length.values()))
 
     # save counts to yaml for any further analysis
     to_save = {'ref_lengths': total_ref_length,
@@ -797,8 +785,8 @@ def main():
                           'total_aggr': aggregate_counts,
                          }
                }
-    with open(os.path.join(args.outdir, 'counts.yml'), 'w') as fh:
-         yaml.dump(to_save, fh)
+    with open(os.path.join(args.outdir, 'counts.pkl'), 'wb') as fh:
+         pickle.dump(to_save, fh)
 
     db_fh.close()
     txt_fh.close()

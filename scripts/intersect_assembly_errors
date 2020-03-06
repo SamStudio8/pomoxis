@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 usage="$(basename "$0") [-h] -r <reference> -i <fasta>
 
@@ -15,7 +16,7 @@ OUTDIR="compare_assm"
 THREADS=1
 iflag=false
 rflag=false
-ALIGN_OPTS="-P"
+ALIGN_OPTS=""
 START=$PWD
 
 while getopts ':hr:i:o:t:f' option; do

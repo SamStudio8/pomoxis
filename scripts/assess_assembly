@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 usage="$(basename "$0") [-h] -r <reference> -i <fastq>
 
@@ -10,11 +11,14 @@ Calculate accuracy statistics for an assembly.
     -i  fastq/a input assembly (required).
     -c  chunk size. Input reads/contigs will be broken into chunks
         prior to alignment, 0 will not chunk (default 100000).
-    -C  catalogue errors. 
+    -C  catalogue errors.
+    -H  count homopolymers. 
     -t  alignment threads (default: 1).
     -p  output file prefix (default: assm).
     -T  trim consensus to primary alignments of truth to assembly.
-    -b  .bed file of reference regions to assess."
+    -b  .bed file of reference regions to assess.
+    -l  list all indels at least this long (default: 100).  
+    -e  use with -l option to create a .bed file to exclude indels. If the -b option is used, the two bed files will be combined."
 
 PREFIX="assm"
 THREADS=1
@@ -23,12 +27,15 @@ rflag=false
 iflag=false
 bed_flag=false
 catalogue_flag=false
+homopolymer_flag=false
 trim_flag=false
 ALIGN_OPTS=""
 BED=""
+MIN_INDEL_LEN=100
+exclude_indel_flag=false
 
 
-while getopts ':hr:i:p:c:CTt:b:' option; do
+while getopts ':hr:i:p:c:CHTt:b:l:e' option; do
   case "$option" in
     h  ) echo "$usage" >&2; exit;;
     r  ) rflag=true; REFERENCE=$OPTARG;;
@@ -36,9 +43,12 @@ while getopts ':hr:i:p:c:CTt:b:' option; do
     p  ) PREFIX=$OPTARG;;
     c  ) CHUNK=$OPTARG;;
     C  ) catalogue_flag=true; ALIGN_OPTS="-m";;
-    T  ) trim_flag=true;;
+    H  ) homopolymer_flag=true; ALIGN_OPTS="-m";;
+    T  ) trim_flag=true; ALIGN_OPTS="-m";;
     t  ) THREADS=$OPTARG;;
     b  ) bed_flag=true; BED="--bed $OPTARG"; ALIGN_OPTS="-m";;
+    l  ) MIN_INDEL_LEN="$OPTARG";;
+    e  ) exclude_indel_flag=true; ALIGN_OPTS="-m";;
     \? ) echo "Invalid option: -${OPTARG}." >&2; exit 1;;
     :  ) echo "Option -$OPTARG requires an argument." >&2; exit 1;;
   esac
@@ -49,6 +59,11 @@ if ! $iflag || ! $rflag; then
   echo "$usage" >&2;
   echo "-i and -r must be specified." >&2;
   exit 1;
+fi
+
+if $bed_flag && $homopolymer_flag; then
+    echo "Using a .bed file for homopolymer analysis is not currently supported."
+    exit 1;
 fi
 
 if (($CHUNK > 0)); then
@@ -63,7 +78,32 @@ fi
 
 mini_align -i $INPUT -r $REFERENCE -p $PREFIX -t $THREADS $ALIGN_OPTS 
 
-stats_from_bam ${PREFIX}.bam -o ${PREFIX}_stats.txt ${BED} 
+echo "Writing list of indels ${MIN_INDEL_LEN} bases and longer to ${PREFIX}_indel_ge${MIN_INDEL_LEN}.txt."
+# find indels and write to a .bed file
+find_indels -m ${MIN_INDEL_LEN} ${PREFIX}.bam -o ${PREFIX}_indel_ge${MIN_INDEL_LEN}.txt -b ${PREFIX}_indel_ge${MIN_INDEL_LEN}.bed
+
+if $exclude_indel_flag; then
+    if ! $bed_flag; then  
+        # if no bedfile has been given, create one spanning the genome
+        BEDFILE=${PREFIX}_ref_contigs.bed
+        samtools idxstats ${PREFIX}.bam | awk '{if(!/\*/){print $1"\t0\t"$2}}' > ${BEDFILE}
+        echo "Creating bed file to mask out indels ${MIN_INDEL_LEN} bases and longer."
+    else
+        echo "Subtracting indels ${MIN_INDEL_LEN} bases and longer from provided bed file."
+        # strip --bed prefix from $BED
+        BEDFILE=$(echo $BED | sed 's/--bed//')
+    fi
+    # if a bedfile has been given, subtract indel intervals from it
+    bedtools subtract -a ${BEDFILE} -b ${PREFIX}_indel_ge${MIN_INDEL_LEN}.bed > ${PREFIX}.bed
+    BED="--bed ${PREFIX}.bed"
+fi
+
+
+STATS_THREADS=1
+if [[ "$BED" != "" ]]; then
+    STATS_THREADS=$THREADS
+fi
+stats_from_bam ${PREFIX}.bam -o ${PREFIX}_stats.txt -t ${STATS_THREADS} ${BED} 
 
 summary_from_stats -i ${PREFIX}_stats.txt -pr -o ${PREFIX}_summ.txt
 
@@ -76,4 +116,11 @@ fi
 grep 'Percentage Errors' -A 7 -m 1 ${PREFIX}_summ.txt
 grep 'Q Scores' -A 7 -m 1 ${PREFIX}_summ.txt
 
-echo "All done, output written to ${PREFIX}_stats.txt and ${PREFIX}_summ.txt"
+if $homopolymer_flag; then
+    OUTDIR=${PREFIX}_homopolymer
+    echo "Running homopolymer count, saving data to ${OUTDIR}"
+    assess_homopolymers count ${PREFIX}.bam -o ${OUTDIR} 
+fi
+
+
+echo "All done, output written to ${PREFIX}_stats.txt, ${PREFIX}_summ.txt and ${PREFIX}_indel_ge${MIN_INDEL_LEN}.txt"

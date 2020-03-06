@@ -1,17 +1,12 @@
 # pomoxis requirements. 
 # Add comments to keep track of why we are using particular versions
-aiozmq
 biopython >= 1.63
-cffi
 fast5_research
 intervaltree >= 3
 matplotlib
 mappy
-msgpack-python
 numpy
 pandas
-pysam
-scrappie
-watchdog
+pysam==0.15.2     # latest with non-broken wheels (21Aug2019)
 git+https://github.com/rrwick/Porechop
 
