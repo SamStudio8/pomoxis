@@ -19,7 +19,7 @@ def main():
     logging.basicConfig(format='[%(asctime)s - %(name)s] %(message)s', datefmt='%H:%M:%S', level=logging.INFO)
     parser = argparse.ArgumentParser(
         prog='subsample_bam',
-        description='Subsample a bam to uniform or proportional depth',
+        description='Quickly subsample a bam to uniform depth',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('bam',
         help='input bam file.')
@@ -56,12 +56,6 @@ def main():
     uparser.add_argument('-s', '--stride', type=int, default=1000,
         help='Stride in genomic coordinates when searching for new reads. Smaller can lead to more compact pileup.')
 
-    pparser = parser.add_argument_group('Proportional sampling options')
-    pparser.add_argument('-P', '--proportional', default=False, action='store_true',
-        help='Activate proportional sampling, thus keeping depth variations of the pileup.')
-    pparser.add_argument('-S', '--seed', default=None, type=int,
-        help='Random seed for proportional downsampling of reads.')
-
     args = parser.parse_args()
     if args.threads == -1:
         args.threads = multiprocessing.cpu_count()
@@ -74,10 +68,7 @@ def main():
         else:
             regions = [Region(ref_name=r, start=0, end=ref_lengths[r]) for r in bam.references]
 
-    if args.proportional:
-        worker = functools.partial(subsample_region_proportionally, args=args)
-    else:
-        worker = functools.partial(subsample_region_uniformly, args=args)
+    worker = functools.partial(subsample_region_uniformly, args=args)
 
     enough_depth = []
     with ProcessPoolExecutor(max_workers=args.threads) as executor:
@@ -88,55 +79,6 @@ def main():
         raise RuntimeError('Insufficient read coverage for one or more requested regions.')
     if args.all_fail and all([not x for x in enough_depth]):
         raise RuntimeError('Insufficient read coverage for all requested regions.')
-
-
-def subsample_region_proportionally(region, args):
-    if args.quality is not None or args.coverage is not None or args.accuracy is not None:
-        raise NotImplemented('Read filtering is not currently supported for proportion subsampling')
-
-    logger = logging.getLogger(region.ref_name)
-    coverage_summary = coverage_summary_of_region(region, args.bam, args.stride)
-    col = 'depth_{}'.format(args.orientation) if args.orientation is not None else 'depth'
-    median_coverage = coverage_summary[col].T['50%']
-    with pysam.AlignmentFile(args.bam) as bam:
-        def _read_iter():
-            for r in bam.fetch(region.ref_name, region.start, region.end):
-                if not filter_read(r, bam, args, logger):
-                    yield r
-
-        reads = _read_iter()
-        # query names cannot be longer than 251
-        dtype=[('name', 'U251'), ('start', int),('end',  int)]
-        read_data = np.fromiter(
-            ((r.query_name, r.reference_start, r.reference_end) for r in reads),
-            dtype=dtype
-        )
-
-    targets = sorted(args.depth)
-    found_enough_depth = True
-
-    coverage = np.zeros(region.end - region.start, dtype=np.uint16)
-    if args.seed is not None:
-        np.random.seed(args.seed)
-
-    for target in targets:
-        if target > median_coverage:
-            msg = 'Target depth {} exceeds median coverage {}, skipping this depth and higher depths.'
-            logger.info(msg.format(target, median_coverage))
-            found_enough_depth = False
-            break
-        fraction = target / median_coverage
-        n_reads = int(round(fraction * len(read_data), 0))
-        target_reads = np.random.choice(read_data, n_reads, replace=False)
-        prefix = '{}_{}X'.format(args.output_prefix, target)
-        _write_bam(args.bam, prefix, region, target_reads['name'])
-        coverage.fill(0.0)  # reset coverage for each target depth
-        for read in target_reads:
-            coverage[read['start'] - region.start:read['end'] - region.start] += 1
-        _write_coverage(prefix, region, coverage, args.profile)
-        logger.info('Processed {}X: {} reads ({:.2f} %).'.format(target, n_reads, 100 * fraction))
-
-    return found_enough_depth
 
 
 def filter_read(r, bam, args, logger):
