@@ -177,7 +177,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         bam = pysam.AlignmentFile(args.bam)
 
         # Begin cursor at region start
-        CURSOR_DIST = 250
+        CURSOR_DIST = 500
         closest_cursor = region.start
         if closest_cursor == 0:
             closest_cursor += CURSOR_DIST
@@ -242,22 +242,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                             if args.output_fasta:
                                 read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/fastq
 
-                        print("BLIP", track_ends)
-                        next_cursor = closest_cursor
-                        next_i = 1
-                        while next_cursor <= read.reference_start:
-                            next_cursor = sorted(set(track_ends))[next_i]
-                            next_i += 1
-
-                        #for read_j in range(read_i+1, len(tracks_at_cursor)):
-                        #    curr_track = tracks_at_cursor[read_j]
-                        #    track_ends[curr_track] = next_cursor
-                        #print("BLOP", track_ends)
-
-                        # prevent assigning a track end that the cursor has already passed
-                        for t_i, track_end in enumerate(track_ends):
-                            if track_end <= read.reference_start:
-                                track_ends[t_i] = next_cursor
+                        #print("BLIP", track_ends)
 
                         #print("READ_i")
                         #for read_i, read in enumerate(chosen_reads):
@@ -275,7 +260,33 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                 closest_cursor = np.amin(track_ends)
                 logger.info("\n\nClosest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
                 if read.reference_start > closest_cursor:
-                    sys.exit(1)
+                    next_i = 1
+                    next_cursor = closest_cursor
+                    while next_cursor <= read.reference_start:
+                        try:
+                            next_cursor = sorted(set(track_ends))[next_i]
+                            next_i += 1
+                        except IndexError:
+                            next_cursor = np.inf
+                            break
+
+                    next_cursor = min(next_cursor, read.reference_start + 1000)
+
+                    #for read_j in range(read_i+1, len(tracks_at_cursor)):
+                    #    curr_track = tracks_at_cursor[read_j]
+                    #    track_ends[curr_track] = next_cursor
+                    #print("BLOP", track_ends)
+
+                    # prevent assigning a track end that the cursor has already passed
+                    for t_i, track_end in enumerate(track_ends):
+                        if track_end <= read.reference_start:
+                            track_ends[t_i] = next_cursor
+
+                            if next_cursor not in cursors:
+                                cursors[next_cursor] = []
+                            #cursors[next_cursor].extend(cursors[track_end])
+                            #del cursors[track_end]
+
 
 
         median_depth = np.median(track_cov)
