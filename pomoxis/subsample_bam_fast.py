@@ -71,7 +71,7 @@ def main():
         p = Process(target=subsample_region_uniformly, args=(work_queue, bam_ret_d, read_ret_q, args))
         processes.append(p)
     if args.output_fasta:
-        p = Process(target=write_reads, args=(ret_read_q, args))
+        p = Process(target=write_reads, args=(read_ret_q, args))
         processes.append(p)
     for p in processes:
         p.start()
@@ -134,7 +134,7 @@ def filter_read(r, bam, args, logger):
 
 
 def get_cursor_reads(bam, contig, cursor, args, max_abs_dist=500, seen=[]):
-    logger = logging.getLogger()
+    logger = logging.getLogger(contig)
     # Pileup reads around the cursor and organise them into a structure
     # based on their start distance compared to the cursor
     candidates_by_distance = {}
@@ -143,7 +143,7 @@ def get_cursor_reads(bam, contig, cursor, args, max_abs_dist=500, seen=[]):
     #   * cursor is 0 indexed
     #   * stepper "all" will drop secondary reads etc.
     #   * min_base_quality is 0, if you want to drop reads based on quality, let filter_read do it
-    for pcol in bam.pileup(contig=contig, start=cursor, end=cursor+1, stepper="all", min_base_quality=0):
+    for pcol in bam.pileup(contig=contig, start=cursor, stop=cursor+1, stepper="all", min_base_quality=0, truncate=True):
         for alignment in pcol.pileups:
             read = alignment.alignment
             if filter_read(read, bam, args, logger):
@@ -151,7 +151,8 @@ def get_cursor_reads(bam, contig, cursor, args, max_abs_dist=500, seen=[]):
 
             # drop read if was seen recently
             if read.query_name in seen:
-                continue
+                pass
+                #continue
 
             # Select reads that begin before, or ON the cursor
             if read.reference_start == cursor+1:
@@ -166,7 +167,7 @@ def get_cursor_reads(bam, contig, cursor, args, max_abs_dist=500, seen=[]):
             if delta not in candidates_by_distance:
                 candidates_by_distance[delta] = []
             candidates_by_distance[delta].append(read)
-
+        break # only need one column
     return candidates_by_distance
 
 def select_cursor_reads(d_reads, n=1):
@@ -234,7 +235,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
             region = work["region"]
 
         logger = logging.getLogger(region.ref_name)
-        logger.info("Pulled %s from queue" )
+        logger.info("Pulled %s from queue" % region.ref_name)
 
         bam = pysam.AlignmentFile(args.bam)
 
@@ -251,13 +252,17 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         track_cov = np.zeros(region.end - region.start)
 
         offset = 0
-        while cursor < region.end:
+        while (cursor+offset) < region.end:
+            logger.info("Cursor advanced to %d (+%d)" % (cursor, offset))
             # Count the number of tracks that need to be filled at this position
             tracks_at_cursor = np.argwhere(track_ends == cursor).flatten()
 
             # Gather the reads, then randomly select one for each track
             eligible_reads = get_cursor_reads(bam, region.ref_name, cursor+offset, args, seen=seen_reads)
             chosen_reads = select_cursor_reads(eligible_reads, len(tracks_at_cursor))
+
+            if len(chosen_reads) == 0:
+                logger.error("No reads found at cursor position %d" % (cursor+offset))
 
             for read_i, read in enumerate(chosen_reads):
                 n_reads += 1
@@ -273,22 +278,8 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
 
             # Move cursor to earliest track end
-            print("************************")
-            print("************************")
-            print("************************")
-            print("************************")
-            print("************************")
-            print("************************")
-            print("************************")
-            print("************************")
-            print(np.argmin(track_ends))
-            print("************************")
-            print("************************")
-            print("************************")
-            print("************************")
-            curr_track = np.argmin(track_ends)
             last_cursor = cursor
-            cursor = track_ends[curr_track]
+            cursor = np.amin(track_ends)
 
             # If no reads were found, the cursor won't move, advance it manually
             if cursor == last_cursor:
