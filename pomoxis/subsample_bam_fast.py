@@ -138,6 +138,56 @@ def filter_read(r, bam, args, logger):
     return False
 
 
+def get_cursor_reads(bam, cursor, max_abs_dist=500):
+    # Pileup reads around the cursor and organise them into a structure
+    # based on their start distance compared to the cursor
+    candidates_by_distance = {}
+
+    # Call pileup at cursor
+    #   * cursor is 0 indexed
+    #   * stepper "all" will drop secondary reads etc.
+    #   * min_base_quality is 0, if you want to drop reads based on quality, let filter_read do it
+    for pcol in bam.pileup(contig=region.ref_name, start=cursor, end=cursor+1, stepper="all", min_base_quality=0):
+        for read in pcol.pileups:
+            if filter_read(read, args):
+                continue
+
+            # Select reads that begin before, or ON the cursor
+            if read.reference_start == cursor+1:
+                break
+
+            delta = abs(read.reference_start - cursor) # force positive as we're only looking left of cursor now
+
+            # limit max distance from cursor
+            if abs(delta) > max_abs_dist:
+                continue
+
+            if delta not in candidates_by_distance:
+                candidates_by_distance[delta] = []
+            candidates_by_distance[delta].append(read)
+
+    return candidates_by_distance
+
+def select_cursor_reads(d_reads, n=1):
+    selected = []
+    bins = sorted(d_reads.keys())
+    bins_round = 0
+
+    while len(selected) < n:
+        # Keep adding bins until at least N bins have been observed
+        selected.extend( d_reads[bins[bins_round]] )
+
+        bins_round += 1
+        if len(selected) < n and bins_round == len(bins):
+            logger.warning("[select_cursor_reads] Eligible reads underfilled. Desired %d, Acquired %d" % (n, len(selected)))
+            return selected # return what we have without randomising
+
+    return np.random.choice(selected, n, replace=False) # select N random reads without replacement
+
+
+
+
+
 def subsample_region_uniformly(work_q, return_q, args):
     while True:
         work = work_q.get()
@@ -149,73 +199,41 @@ def subsample_region_uniformly(work_q, return_q, args):
             region = work["region"]
 
         logger = logging.getLogger(region.ref_name)
-        logger.info("Building interval tree.")
-        tree = IntervalTree()
-        with pysam.AlignmentFile(args.bam) as bam:
-            ref_lengths = dict(zip(bam.references, bam.lengths))
-            for r in bam.fetch(region.ref_name, region.start, region.end):
-                if filter_read(r, bam, args, logger):
-                    continue
-                # trim reads to region
-                tree.add(Interval(
-                    max(r.reference_start, region.start), min(r.reference_end, region.end),
-                    r.query_name))
+        logger.info("Pulled %s from queue" )
 
-        logger.info('Starting pileup.')
-        coverage = np.zeros(region.end - region.start, dtype=np.uint16)
-        reads = set()
+        # Begin cursor at region start
+        cursor = region.start
+
+        # Initialise a coverage track for each layer of desired depth
+        track_ends = np.full((1, args.depth[0]), cursor)
+
+        # Keep track of reads and coverage
         n_reads = 0
-        iteration = 0
-        it_no_change = 0
-        last_depth = 0
-        targets = iter(sorted(args.depth))
-        target = next(targets)
-        found_enough_depth = True
-        while True:
-            cursor = 0
-            while cursor < ref_lengths[region.ref_name]:
-                read = _nearest_overlapping_point(tree, cursor)
-                if read is None:
-                    cursor += args.stride
-                else:
-                    reads.add(read.data)
-                    cursor = read.end
-                    coverage[read.begin - region.start:read.end - region.start] += 1
-                    tree.remove(read)
-            iteration += 1
-            median_depth = np.median(coverage)
-            stdv_depth = np.std(coverage)
-            logger.debug(u'Iteration {}. reads: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(
-                iteration, len(reads), median_depth, stdv_depth))
-            # output when we hit a target
-            if median_depth >= target:
-                logger.info("Hit target depth {}.".format(target))
-                prefix = '{}_{}X'.format(args.output_prefix, target)
-                _write_bam(args.bam, prefix, region, reads)
-                _write_coverage(prefix, region, coverage, args.profile)
-                try:
-                    target = next(targets)
-                except StopIteration:
-                    break
-            # exit if nothing happened this iteration
-            if n_reads == len(reads):
-                logger.warn("No reads added, finishing pileup.")
-                found_enough_depth = False
-                break
-            n_reads = len(reads)
-            # or if no change in depth
-            if median_depth == last_depth:
-                it_no_change += 1
-                if it_no_change == args.patience:
-                    logging.warn("Coverage not increased for {} iterations, finishing pileup.".format(
-                        args.patience
-                    ))
-                    found_enough_depth = False
-                    break
-            else:
-                it_no_change == 0
-            last_depth = median_depth
-        return found_enough_depth
+        track_reads = {}
+        track_cov = np.zeros(region.end - region.start)
+
+        while cursor < region.end:
+            # Count the number of tracks that need to be filled at this position
+            tracks_at_cursor = np.argwhere(track_ends == cursor).flatten()
+
+            # Gather the reads, then randomly select one for each track
+            eligible_reads = get_cursor_reads(bam, cursor)
+            chosen_reads = select_cursor_reads(eligible_reads, len(tracks_at_cursor))
+
+            for read_i, read in enumerate(chosen_reads):
+                n_reads += 1
+                curr_track = tracks_at_cursor[read_i]
+                track_reads[curr_track] = read
+                track_ends[curr_track] = read.reference_end
+                track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
+
+            # Move cursor to earliest track end
+            curr_track = np.argmin(track_ends)
+            cursor = track_ends[curr_track]
+
+        median_depth = np.median(track_cov)
+        stdv_depth = np.std(track_cov)
+        logger.info(u'region: {}, reads: {}, target: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(region.ref_name, n_reads, args.depth[0], median_depth, stdv_depth))
 
 
 def _nearest_overlapping_point(src, point):
