@@ -1,7 +1,7 @@
 import argparse
 import functools
 import logging
-import multiprocessing import cpu_count, Process, Queue, Array
+import multiprocessing import cpu_count, Process, Queue, Manager
 import os
 
 from intervaltree import IntervalTree, Interval
@@ -62,11 +62,13 @@ def main():
 
     processes = []
     work_queue = Queue()
-    ret_read_q = Queue()
-    ret_bam_q = Queue()
+    read_ret_q = Queue()
+
+    manager = multiprocessing.Manager()
+    bam_ret_d = manager.dict()
 
     for _ in range(args.threads):
-        p = Process(target=subsample_region_uniformly, args=(work_queue, ret_bam_q, ret_read_q, args))
+        p = Process(target=subsample_region_uniformly, args=(work_queue, bam_ret_d, read_ret_q, args))
         process.append(p)
     for p in processes:
         p.start()
@@ -202,8 +204,19 @@ def write_reads(read_q, args):
     reads_fh.close()
 
 
+def write_bam(uuid_d, args):
+    src_bam = pysam.AlignmentFile(bam, "rb")
+    out_bam = pysam.AlignmentFile(args.output, "wb", template=src_bam)
 
-def subsample_region_uniformly(work_q, bam_ret_q, read_ret_q, args):
+    # One-pass through BAM means the output should be sorted?
+    for read in src_bam.fetch():
+        if "%s:%d" % (read.query_name, read.reference_start) in uuid_d:
+            out_bam.write(read)
+    src_bam.close()
+    out_bam.close()
+
+
+def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
     while True:
         work = work_q.get()
         if work is None:
@@ -243,8 +256,8 @@ def subsample_region_uniformly(work_q, bam_ret_q, read_ret_q, args):
                 track_ends[curr_track] = read.reference_end
                 track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
 
-                bam_ret_q.put(read.query_name) # send read name to write to new BAM after all threads are done
                 seen_reads.add(read.query_name)
+                bam_ret_d["%s:%d" % (read.query_name, read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
 
                 if args.output_fasta:
                     read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
