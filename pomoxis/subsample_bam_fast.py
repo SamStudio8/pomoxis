@@ -221,7 +221,6 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                 for c_i in np.argsort(keys):
                     c_cursor = keys[c_i]
                     if read.reference_start >= c_cursor:
-                        print("%d : passed cursor %d" % (read.reference_start, c_cursor))
                         tracks_at_cursor = np.argwhere(track_ends == c_cursor).flatten()
                         chosen_reads = np.random.choice(cursors[c_cursor], min(len(cursors[c_cursor]), len(tracks_at_cursor)), replace=False)
 
@@ -245,7 +244,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
 
                 # Count the number of tracks that need to be filled at this position
                 closest_cursor = np.amin(track_ends)
-                logger.info("\n\nClosest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
+                #logger.info("Closest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
 
                 # prevent assigning a track end that the cursor has already passed
                 if read.reference_start > closest_cursor:
