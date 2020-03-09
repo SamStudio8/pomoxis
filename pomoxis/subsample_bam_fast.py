@@ -24,8 +24,8 @@ def main():
         help='input bam file.')
     parser.add_argument('depth', nargs='+', type=int,
         help='Target depth.')
-    parser.add_argument('-o', '--output_prefix', default='sub_sampled',
-        help='Output prefix')
+    parser.add_argument('-o', '--output', required=True, default='-',
+        help='path to BAM [default -]')
     parser.add_argument('-r', '--regions', nargs='+',
         help='Only process given regions.')
     parser.add_argument('-p', '--profile', type=int, default=1000,
