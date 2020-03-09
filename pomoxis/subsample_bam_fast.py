@@ -67,8 +67,6 @@ def main():
         else:
             regions = [Region(ref_name=r, start=0, end=ref_lengths[r]) for r in bam.references]
 
-    worker = functools.partial(subsample_region_uniformly, args=args)
-
     enough_depth = []
 
     processes = []
@@ -76,7 +74,7 @@ def main():
     return_queue = Queue()
 
     for _ in range(args.threads):
-        p = Process(target=subsample_region_uniformally, args=(work_queue, return_queue, args))
+        p = Process(target=subsample_region_uniformly, args=(work_queue, return_queue, args))
         process.append(p)
     for p in processes:
         p.start()
