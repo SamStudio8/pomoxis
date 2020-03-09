@@ -195,6 +195,9 @@ def write_reads(read_q, args):
                 break
             continue
 
+        # Write read (by parsing pysam AlignedSegment as str)
+        reads_fh.write(">%s\n%s\n" % (fields[0], read.split()[9]))
+
     reads_fh.close()
 
 
