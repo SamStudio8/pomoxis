@@ -73,6 +73,8 @@ def main():
     if args.output_fasta:
         p = Process(target=write_reads, args=(read_ret_q, args))
         processes.append(p)
+    pp = Process(target=write_bam, args=(bam_ret_d, args))
+    processes.append(pp)
     for p in processes:
         p.start()
 
@@ -89,13 +91,8 @@ def main():
     for p in processes:
         p.join()
 
-
     # Write the BAM out (it's mp-ready, but uses one thread for now)
-    post_processes = []
-    p = Process(target=write_bam, args=(bam_ret_d, args))
-    post_processes.append(p)
-    p.start()
-    p.join()
+    pp.join()
 
 
 def filter_read(r, bam, args, logger):
