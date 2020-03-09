@@ -64,18 +64,17 @@ def main():
     work_queue = Queue()
     read_ret_q = Queue()
 
-    manager = multiprocessing.Manager()
+    manager = Manager()
     bam_ret_d = manager.dict()
 
     for _ in range(args.threads):
         p = Process(target=subsample_region_uniformly, args=(work_queue, bam_ret_d, read_ret_q, args))
-        process.append(p)
-    for p in processes:
-        p.start()
-
+        processes.append(p)
     if args.output_fasta:
         p = Process(target=write_reads, args=(ret_read_q, args))
         processes.append(p)
+    for p in processes:
+        p.start()
 
     for region in regions:
         work_queue.put({
@@ -93,9 +92,9 @@ def main():
 
     # Write the BAM out (it's mp-ready, but uses one thread for now)
     post_processes = []
-    p = Process(target=write_bam, args=(ret_bam_q, args))
+    p = Process(target=write_bam, args=(bam_ret_d, args))
     post_processes.append(p)
-    ret_bam_q.put(None)
+    p.start()
     p.join()
 
 
@@ -134,7 +133,8 @@ def filter_read(r, bam, args, logger):
     return False
 
 
-def get_cursor_reads(bam, cursor, max_abs_dist=500, seen=[]):
+def get_cursor_reads(bam, contig, cursor, args, max_abs_dist=500, seen=[]):
+    logger = logging.getLogger()
     # Pileup reads around the cursor and organise them into a structure
     # based on their start distance compared to the cursor
     candidates_by_distance = {}
@@ -143,9 +143,10 @@ def get_cursor_reads(bam, cursor, max_abs_dist=500, seen=[]):
     #   * cursor is 0 indexed
     #   * stepper "all" will drop secondary reads etc.
     #   * min_base_quality is 0, if you want to drop reads based on quality, let filter_read do it
-    for pcol in bam.pileup(contig=region.ref_name, start=cursor, end=cursor+1, stepper="all", min_base_quality=0):
-        for read in pcol.pileups:
-            if filter_read(read, args):
+    for pcol in bam.pileup(contig=contig, start=cursor, end=cursor+1, stepper="all", min_base_quality=0):
+        for alignment in pcol.pileups:
+            read = alignment.alignment
+            if filter_read(read, bam, args, logger):
                 continue
 
             # drop read if was seen recently
@@ -169,9 +170,15 @@ def get_cursor_reads(bam, cursor, max_abs_dist=500, seen=[]):
     return candidates_by_distance
 
 def select_cursor_reads(d_reads, n=1):
+    logger = logging.getLogger()
+
     selected = []
     bins = sorted(d_reads.keys())
     bins_round = 0
+
+    if len(bins) == 0:
+        logger.error("[select_cursor_reads] No reads found.")
+        return selected
 
     while len(selected) < n:
         # Keep adding bins until at least N bins have been observed
@@ -205,7 +212,7 @@ def write_reads(read_q, args):
 
 
 def write_bam(uuid_d, args):
-    src_bam = pysam.AlignmentFile(bam, "rb")
+    src_bam = pysam.AlignmentFile(args.bam, "rb")
     out_bam = pysam.AlignmentFile(args.output, "wb", template=src_bam)
 
     # One-pass through BAM means the output should be sorted?
@@ -229,11 +236,13 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         logger = logging.getLogger(region.ref_name)
         logger.info("Pulled %s from queue" )
 
+        bam = pysam.AlignmentFile(args.bam)
+
         # Begin cursor at region start
         cursor = region.start
 
         # Initialise a coverage track for each layer of desired depth
-        track_ends = np.full((1, args.depth), cursor)
+        track_ends = np.full(args.depth, cursor)
 
         # Keep track of reads and coverage
         n_reads = 0
@@ -241,12 +250,13 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         track_reads = {}
         track_cov = np.zeros(region.end - region.start)
 
+        offset = 0
         while cursor < region.end:
             # Count the number of tracks that need to be filled at this position
             tracks_at_cursor = np.argwhere(track_ends == cursor).flatten()
 
             # Gather the reads, then randomly select one for each track
-            eligible_reads = get_cursor_reads(bam, cursor, seen=seen_reads)
+            eligible_reads = get_cursor_reads(bam, region.ref_name, cursor+offset, args, seen=seen_reads)
             chosen_reads = select_cursor_reads(eligible_reads, len(tracks_at_cursor))
 
             for read_i, read in enumerate(chosen_reads):
@@ -263,8 +273,28 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
 
             # Move cursor to earliest track end
+            print("************************")
+            print("************************")
+            print("************************")
+            print("************************")
+            print("************************")
+            print("************************")
+            print("************************")
+            print("************************")
+            print(np.argmin(track_ends))
+            print("************************")
+            print("************************")
+            print("************************")
+            print("************************")
             curr_track = np.argmin(track_ends)
+            last_cursor = cursor
             cursor = track_ends[curr_track]
+
+            # If no reads were found, the cursor won't move, advance it manually
+            if cursor == last_cursor:
+                offset += 500
+            else:
+                offset = 0
 
         median_depth = np.median(track_cov)
         stdv_depth = np.std(track_cov)
