@@ -46,18 +46,6 @@ def main():
     parser.add_argument('--output-fasta', default=None,
         help='Create a FASTA file of the subsampled reads.')
 
-    eparser = parser.add_mutually_exclusive_group()
-    eparser.add_argument('--any_fail', action='store_true',
-        help='Exit with an error if any region has insufficient coverage.')
-    eparser.add_argument('--all_fail', action='store_true',
-        help='Exit with an error if all regions have insufficient coverage.')
-
-    uparser = parser.add_argument_group('Uniform sampling options')
-    uparser.add_argument('-x', '--patience', default=5, type=int,
-        help='Maximum iterations with no change in median coverage before aborting.')
-    uparser.add_argument('-s', '--stride', type=int, default=1000,
-        help='Stride in genomic coordinates when searching for new reads. Smaller can lead to more compact pileup.')
-
     args = parser.parse_args()
     if args.threads == -1:
         args.threads = cpu_count()
@@ -107,13 +95,6 @@ def main():
     post_processes.append(p)
     ret_bam_q.put(None)
     p.join()
-
-
-
-    if args.any_fail and not all(enough_depth):
-        raise RuntimeError('Insufficient read coverage for one or more requested regions.')
-    if args.all_fail and all([not x for x in enough_depth]):
-        raise RuntimeError('Insufficient read coverage for all requested regions.')
 
 
 def filter_read(r, bam, args, logger):
