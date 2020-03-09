@@ -138,7 +138,7 @@ def filter_read(r, bam, args, logger):
     return False
 
 
-def get_cursor_reads(bam, cursor, max_abs_dist=500):
+def get_cursor_reads(bam, cursor, max_abs_dist=500, seen=[]):
     # Pileup reads around the cursor and organise them into a structure
     # based on their start distance compared to the cursor
     candidates_by_distance = {}
@@ -150,6 +150,10 @@ def get_cursor_reads(bam, cursor, max_abs_dist=500):
     for pcol in bam.pileup(contig=region.ref_name, start=cursor, end=cursor+1, stepper="all", min_base_quality=0):
         for read in pcol.pileups:
             if filter_read(read, args):
+                continue
+
+            # drop read if was seen recently
+            if read.query_name in seen:
                 continue
 
             # Select reads that begin before, or ON the cursor
@@ -209,6 +213,7 @@ def subsample_region_uniformly(work_q, return_q, args):
 
         # Keep track of reads and coverage
         n_reads = 0
+        seen_reads = set([])
         track_reads = {}
         track_cov = np.zeros(region.end - region.start)
 
@@ -217,7 +222,7 @@ def subsample_region_uniformly(work_q, return_q, args):
             tracks_at_cursor = np.argwhere(track_ends == cursor).flatten()
 
             # Gather the reads, then randomly select one for each track
-            eligible_reads = get_cursor_reads(bam, cursor)
+            eligible_reads = get_cursor_reads(bam, cursor, seen=seen_reads)
             chosen_reads = select_cursor_reads(eligible_reads, len(tracks_at_cursor))
 
             for read_i, read in enumerate(chosen_reads):
@@ -226,6 +231,8 @@ def subsample_region_uniformly(work_q, return_q, args):
                 track_reads[curr_track] = read
                 track_ends[curr_track] = read.reference_end
                 track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
+                return_q.put(read.to_string())
+                seen_reads.add(read.query_name)
 
             # Move cursor to earliest track end
             curr_track = np.argmin(track_ends)
