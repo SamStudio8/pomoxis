@@ -1,8 +1,8 @@
 import argparse
 import functools
 import logging
-import multiprocessing import cpu_count, Process, Queue, Manager
 import os
+from multiprocessing import cpu_count, Process, Queue, Manager
 
 from intervaltree import IntervalTree, Interval
 import numpy as np
