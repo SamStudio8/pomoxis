@@ -133,66 +133,6 @@ def filter_read(r, bam, args, logger):
     return False
 
 
-def get_cursor_reads(bam, contig, cursor, args, max_abs_dist=500, seen=[]):
-    logger = logging.getLogger(contig)
-    # Pileup reads around the cursor and organise them into a structure
-    # based on their start distance compared to the cursor
-    candidates_by_distance = {}
-
-    # Call pileup at cursor
-    #   * cursor is 0 indexed
-    #   * stepper "all" will drop secondary reads etc.
-    #   * min_base_quality is 0, if you want to drop reads based on quality, let filter_read do it
-    for pcol in bam.pileup(contig=contig, start=cursor, stop=cursor+1, stepper="all", min_base_quality=0, truncate=True):
-        for alignment in pcol.pileups:
-            read = alignment.alignment
-            if filter_read(read, bam, args, logger):
-                continue
-
-            # drop read if was seen recently
-            if read.query_name in seen:
-                pass
-                #continue
-
-            # Select reads that begin before, or ON the cursor
-            if read.reference_start == cursor+1:
-                break
-
-            delta = abs(read.reference_start - cursor) # force positive as we're only looking left of cursor now
-
-            # limit max distance from cursor
-            if abs(delta) > max_abs_dist:
-                continue
-
-            if delta not in candidates_by_distance:
-                candidates_by_distance[delta] = []
-            candidates_by_distance[delta].append(read)
-        break # only need one column
-    return candidates_by_distance
-
-def select_cursor_reads(d_reads, n=1):
-    logger = logging.getLogger()
-
-    selected = []
-    bins = sorted(d_reads.keys())
-    bins_round = 0
-
-    if len(bins) == 0:
-        logger.error("[select_cursor_reads] No reads found.")
-        return selected
-
-    while len(selected) < n:
-        # Keep adding bins until at least N bins have been observed
-        selected.extend( d_reads[bins[bins_round]] )
-
-        bins_round += 1
-        if len(selected) < n and bins_round == len(bins):
-            logger.warning("[select_cursor_reads] Eligible reads underfilled. Desired %d, Acquired %d" % (n, len(selected)))
-            return selected # return what we have without randomising
-
-    return np.random.choice(selected, n, replace=False) # select N random reads without replacement
-
-
 def write_reads(read_q, args):
     reads_fh = open(args.output_fasta, 'w')
     dead_threads = 0
@@ -240,10 +180,14 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         bam = pysam.AlignmentFile(args.bam)
 
         # Begin cursor at region start
-        cursor = region.start
+        CURSOR_DIST = 250
+        closest_cursor = region.start
+        if closest_cursor == 0:
+            closest_cursor += CURSOR_DIST
+        cursors = {closest_cursor: []}
 
         # Initialise a coverage track for each layer of desired depth
-        track_ends = np.full(args.depth, cursor)
+        track_ends = np.full(args.depth, max(closest_cursor, CURSOR_DIST))
 
         # Keep track of reads and coverage
         n_reads = 0
@@ -251,41 +195,71 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         track_reads = {}
         track_cov = np.zeros(region.end - region.start)
 
-        offset = 0
-        while (cursor+offset) < region.end:
-            logger.info("Cursor advanced to %d (+%d)" % (cursor, offset))
-            # Count the number of tracks that need to be filled at this position
-            tracks_at_cursor = np.argwhere(track_ends == cursor).flatten()
 
-            # Gather the reads, then randomly select one for each track
-            eligible_reads = get_cursor_reads(bam, region.ref_name, cursor+offset, args, seen=seen_reads)
-            chosen_reads = select_cursor_reads(eligible_reads, len(tracks_at_cursor))
 
-            if len(chosen_reads) == 0:
-                logger.error("No reads found at cursor position %d" % (cursor+offset))
+        for read_i, read in enumerate(bam.fetch(contig=region.ref_name, start=region.start, end=region.end)):
+            if filter_read(read, bam, args, logger):
+                continue
 
-            for read_i, read in enumerate(chosen_reads):
-                n_reads += 1
-                curr_track = tracks_at_cursor[read_i]
-                track_reads[curr_track] = read
-                track_ends[curr_track] = read.reference_end
-                track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
+            # drop read if used already
+            if read.query_name in seen_reads:
+                continue
 
-                seen_reads.add(read.query_name)
-                bam_ret_d["%s:%d" % (read.query_name, read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
+            # If in range of at least one cursor, randomly pick a close cursor to give this read to
+            if read.reference_start >= closest_cursor-CURSOR_DIST and read.reference_start < closest_cursor:
+                eligible_keys = []
+                keys = list(cursors.keys())
+                for c_i in np.argsort(keys):
+                    c_cursor = keys[c_i]
+                    if read.reference_start >= c_cursor-CURSOR_DIST and read.reference_start < c_cursor:
+                        eligible_keys.append(c_i)
+                #print(cursors.keys(), closest_cursor, read.reference_start)
+                #print({key: len(cursors[key]) for key in cursors})
+                rand_i = np.random.choice(eligible_keys, 1)
+                cursors[keys[int(rand_i)]].append(read)
 
-                if args.output_fasta:
-                    read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
+            # Have we passed at least one cursor?
+            if read.reference_start > closest_cursor:
 
-            # Move cursor to earliest track end
-            last_cursor = cursor
-            cursor = np.amin(track_ends)
+                # Check all the cursors
+                keys = list(cursors.keys())
+                for c_i in np.argsort(keys):
+                    c_cursor = keys[c_i]
+                    if read.reference_start >= c_cursor:
+                        #print("%d : passed cursor %d" % (read.reference_start, c_cursor))
+                        tracks_at_cursor = np.argwhere(track_ends == c_cursor).flatten()
+                        chosen_reads = np.random.choice(cursors[c_cursor], min(len(cursors[c_cursor]), len(tracks_at_cursor)), replace=False)
 
-            # If no reads were found, the cursor won't move, advance it manually
-            if cursor == last_cursor:
-                offset += 500
-            else:
-                offset = 0
+                        read_i = -1
+                        for read_i, read in enumerate(chosen_reads):
+                            n_reads += 1
+                            curr_track = tracks_at_cursor[read_i]
+                            track_reads[curr_track] = read
+                            track_ends[curr_track] = read.reference_end
+                            cursors[read.reference_end] = []
+                            track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
+
+                            seen_reads.add(read.query_name)
+                            bam_ret_d["%s:%d" % (read.query_name, read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
+
+                            if args.output_fasta:
+                                read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
+
+                        second_next = sorted(set(track_ends))[1]
+                        for read_j in range(read_i+1, len(tracks_at_cursor)):
+                            curr_track = tracks_at_cursor[read_j]
+                            track_ends[curr_track] = second_next
+
+                        del cursors[c_cursor] # drop the reads from the cursor watch
+
+
+                # Count the number of tracks that need to be filled at this position
+                closest_cursor = np.amin(track_ends)
+                #logger.info("Closest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
+                if read.reference_start > closest_cursor:
+                    sys
+                #print(track_ends)
+
 
         median_depth = np.median(track_cov)
         stdv_depth = np.std(track_cov)
