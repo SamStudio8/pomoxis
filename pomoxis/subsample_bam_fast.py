@@ -210,8 +210,6 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     c_cursor = keys[c_i]
                     if read.reference_start >= c_cursor-CURSOR_DIST and read.reference_start < c_cursor:
                         eligible_keys.append(c_i)
-                #print(cursors.keys(), closest_cursor, read.reference_start)
-                #print({key: len(cursors[key]) for key in cursors})
                 rand_i = np.random.choice(eligible_keys, 1)
                 cursors[keys[int(rand_i)]].append(read)
 
@@ -242,23 +240,14 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                             if args.output_fasta:
                                 read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/fastq
 
-                        #print("BLIP", track_ends)
-
-                        #print("READ_i")
-                        #for read_i, read in enumerate(chosen_reads):
-                        #    curr_track = tracks_at_cursor[read_i]
-                        #    print(read_i, curr_track, track_ends[curr_track])
-                        #print("READ_j")
-                        #for read_j in range(read_i+1, len(tracks_at_cursor)):
-                        #    curr_track = tracks_at_cursor[read_j]
-                        #    print(read_j, curr_track, track_ends[curr_track])
-
                         del cursors[c_cursor] # drop the reads from the cursor watch
 
 
                 # Count the number of tracks that need to be filled at this position
                 closest_cursor = np.amin(track_ends)
                 logger.info("\n\nClosest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
+
+                # prevent assigning a track end that the cursor has already passed
                 if read.reference_start > closest_cursor:
                     next_i = 1
                     next_cursor = closest_cursor
@@ -270,22 +259,16 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                             next_cursor = np.inf
                             break
 
+                    # select the next_cursor, or 1 kbp from the current position
+                    # opt for the smallest of the two, in case the next_cursor
+                    # is very far away and will leave a big gap in coverage
                     next_cursor = min(next_cursor, read.reference_start + 1000)
 
-                    #for read_j in range(read_i+1, len(tracks_at_cursor)):
-                    #    curr_track = tracks_at_cursor[read_j]
-                    #    track_ends[curr_track] = next_cursor
-                    #print("BLOP", track_ends)
-
-                    # prevent assigning a track end that the cursor has already passed
                     for t_i, track_end in enumerate(track_ends):
                         if track_end <= read.reference_start:
                             track_ends[t_i] = next_cursor
-
                             if next_cursor not in cursors:
                                 cursors[next_cursor] = []
-                            #cursors[next_cursor].extend(cursors[track_end])
-                            #del cursors[track_end]
 
 
 
