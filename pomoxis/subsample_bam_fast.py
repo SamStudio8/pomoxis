@@ -223,39 +223,59 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                 for c_i in np.argsort(keys):
                     c_cursor = keys[c_i]
                     if read.reference_start >= c_cursor:
-                        #print("%d : passed cursor %d" % (read.reference_start, c_cursor))
+                        print("%d : passed cursor %d" % (read.reference_start, c_cursor))
                         tracks_at_cursor = np.argwhere(track_ends == c_cursor).flatten()
                         chosen_reads = np.random.choice(cursors[c_cursor], min(len(cursors[c_cursor]), len(tracks_at_cursor)), replace=False)
 
                         read_i = -1
-                        for read_i, read in enumerate(chosen_reads):
+                        for read_i, chosen_read in enumerate(chosen_reads):
                             n_reads += 1
                             curr_track = tracks_at_cursor[read_i]
-                            track_reads[curr_track] = read
-                            track_ends[curr_track] = read.reference_end
-                            cursors[read.reference_end] = []
-                            track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
+                            track_reads[curr_track] = chosen_read
+                            track_ends[curr_track] = chosen_read.reference_end 
+                            cursors[chosen_read.reference_end] = []
+                            track_cov[chosen_read.reference_start - region.start : chosen_read.reference_end - region.start] += 1
 
-                            seen_reads.add(read.query_name)
-                            bam_ret_d["%s:%d" % (read.query_name, read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
+                            seen_reads.add(chosen_read.query_name)
+                            bam_ret_d["%s:%d" % (chosen_read.query_name, chosen_read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
 
                             if args.output_fasta:
-                                read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
+                                read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/fastq
 
-                        second_next = sorted(set(track_ends))[1]
+                        print("BLIP", track_ends)
+                        next_cursor = closest_cursor
+                        next_i = 1
+                        while next_cursor <= read.reference_start:
+                            next_cursor = sorted(set(track_ends))[next_i]
+                            next_i += 1
+
+                        #for read_j in range(read_i+1, len(tracks_at_cursor)):
+                        #    curr_track = tracks_at_cursor[read_j]
+                        #    track_ends[curr_track] = next_cursor
+                        print("BLOP", track_ends)
+
+                        # prevent assigning a track end that the cursor has already passed
+                        for t_i, track_end in enumerate(track_ends):
+                            if track_end <= read.reference_start:
+                                track_ends[t_i] = next_cursor
+
+                        print("READ_i")
+                        for read_i, read in enumerate(chosen_reads):
+                            curr_track = tracks_at_cursor[read_i]
+                            print(read_i, curr_track, track_ends[curr_track])
+                        print("READ_j")
                         for read_j in range(read_i+1, len(tracks_at_cursor)):
                             curr_track = tracks_at_cursor[read_j]
-                            track_ends[curr_track] = second_next
+                            print(read_j, curr_track, track_ends[curr_track])
 
                         del cursors[c_cursor] # drop the reads from the cursor watch
 
 
                 # Count the number of tracks that need to be filled at this position
                 closest_cursor = np.amin(track_ends)
-                #logger.info("Closest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
+                logger.info("\n\nClosest cursor advanced to %d, last read %d" % (closest_cursor, read.reference_start))
                 if read.reference_start > closest_cursor:
-                    sys
-                #print(track_ends)
+                    sys.exit(1)
 
 
         median_depth = np.median(track_cov)
