@@ -252,21 +252,21 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                         #for read_j in range(read_i+1, len(tracks_at_cursor)):
                         #    curr_track = tracks_at_cursor[read_j]
                         #    track_ends[curr_track] = next_cursor
-                        print("BLOP", track_ends)
+                        #print("BLOP", track_ends)
 
                         # prevent assigning a track end that the cursor has already passed
                         for t_i, track_end in enumerate(track_ends):
                             if track_end <= read.reference_start:
                                 track_ends[t_i] = next_cursor
 
-                        print("READ_i")
-                        for read_i, read in enumerate(chosen_reads):
-                            curr_track = tracks_at_cursor[read_i]
-                            print(read_i, curr_track, track_ends[curr_track])
-                        print("READ_j")
-                        for read_j in range(read_i+1, len(tracks_at_cursor)):
-                            curr_track = tracks_at_cursor[read_j]
-                            print(read_j, curr_track, track_ends[curr_track])
+                        #print("READ_i")
+                        #for read_i, read in enumerate(chosen_reads):
+                        #    curr_track = tracks_at_cursor[read_i]
+                        #    print(read_i, curr_track, track_ends[curr_track])
+                        #print("READ_j")
+                        #for read_j in range(read_i+1, len(tracks_at_cursor)):
+                        #    curr_track = tracks_at_cursor[read_j]
+                        #    print(read_j, curr_track, track_ends[curr_track])
 
                         del cursors[c_cursor] # drop the reads from the cursor watch
 
