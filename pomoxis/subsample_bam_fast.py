@@ -43,6 +43,9 @@ def main():
     parser.add_argument('-l', '--length', type=int, default=None,
         help='Filter reads by read length.')
 
+    parser.add_argument('--output-fasta', default=None,
+        help='Create a FASTA file of the subsampled reads.')
+
     eparser = parser.add_mutually_exclusive_group()
     eparser.add_argument('--any_fail', action='store_true',
         help='Exit with an error if any region has insufficient coverage.')
@@ -71,15 +74,18 @@ def main():
 
     processes = []
     work_queue = Queue()
-    return_queue = Queue()
+    ret_read_q = Queue()
+    ret_bam_q = Queue()
 
     for _ in range(args.threads):
-        p = Process(target=subsample_region_uniformly, args=(work_queue, return_queue, args))
+        p = Process(target=subsample_region_uniformly, args=(work_queue, ret_bam_q, ret_read_q, args))
         process.append(p)
     for p in processes:
         p.start()
-    #p = Process(target=spew_reads, args=(return_queue, args))
-    #processes.append(p)
+
+    if args.output_fasta:
+        p = Process(target=write_reads, args=(ret_read_q, args))
+        processes.append(p)
 
     for region in regions:
         work_queue.put({
@@ -94,6 +100,13 @@ def main():
     for p in processes:
         p.join()
 
+
+    # Write the BAM out (it's mp-ready, but uses one thread for now)
+    post_processes = []
+    p = Process(target=write_bam, args=(ret_bam_q, args))
+    post_processes.append(p)
+    ret_bam_q.put(None)
+    p.join()
 
 
 
@@ -189,15 +202,28 @@ def select_cursor_reads(d_reads, n=1):
     return np.random.choice(selected, n, replace=False) # select N random reads without replacement
 
 
+def write_reads(read_q, args):
+    reads_fh = open(args.output_fasta, 'w')
+    dead_threads = 0
+
+    while True:
+        read = read_q.get()
+        if read is None:
+            dead_threads += 1
+            if dead_threads == args.threads:
+                break
+            continue
+
+    reads_fh.close()
 
 
 
-def subsample_region_uniformly(work_q, return_q, args):
+def subsample_region_uniformly(work_q, bam_ret_q, read_ret_q, args):
     while True:
         work = work_q.get()
         if work is None:
             # If sentinel, push sentinel to return queue and finish
-            return_q.put(None)
+            read_ret_q.put(None)
             return
         else:
             region = work["region"]
@@ -231,8 +257,12 @@ def subsample_region_uniformly(work_q, return_q, args):
                 track_reads[curr_track] = read
                 track_ends[curr_track] = read.reference_end
                 track_cov[read.reference_start - region.start : read.reference_end - region.start] += 1
-                return_q.put(read.to_string())
+
+                bam_ret_q.put(read.query_name) # send read name to write to new BAM after all threads are done
                 seen_reads.add(read.query_name)
+
+                if args.output_fasta:
+                    read_ret_q.put(read.to_string()) # send read data to be written to fasta/fastq
 
             # Move cursor to earliest track end
             curr_track = np.argmin(track_ends)
