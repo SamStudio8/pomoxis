@@ -22,10 +22,10 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('bam',
         help='input bam file.')
-    parser.add_argument('depth', nargs='+', type=int,
+    parser.add_argument('depth', type=int,
         help='Target depth.')
     parser.add_argument('-o', '--output', required=True, default='-',
-        help='path to BAM [default -]')
+        help='path to output subsampled BAM [default -]')
     parser.add_argument('-r', '--regions', nargs='+',
         help='Only process given regions.')
     parser.add_argument('-p', '--profile', type=int, default=1000,
@@ -216,7 +216,7 @@ def subsample_region_uniformly(work_q, bam_ret_q, read_ret_q, args):
         cursor = region.start
 
         # Initialise a coverage track for each layer of desired depth
-        track_ends = np.full((1, args.depth[0]), cursor)
+        track_ends = np.full((1, args.depth), cursor)
 
         # Keep track of reads and coverage
         n_reads = 0
@@ -251,7 +251,7 @@ def subsample_region_uniformly(work_q, bam_ret_q, read_ret_q, args):
 
         median_depth = np.median(track_cov)
         stdv_depth = np.std(track_cov)
-        logger.info(u'region: {}, reads: {}, target: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(region.ref_name, n_reads, args.depth[0], median_depth, stdv_depth))
+        logger.info(u'region: {}, reads: {}, target: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(region.ref_name, n_reads, args.depth, median_depth, stdv_depth))
 
 
 def _nearest_overlapping_point(src, point):
