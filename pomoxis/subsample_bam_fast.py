@@ -238,9 +238,9 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     for c_i in np.argsort(keys):
                         c_cursor = keys[c_i]
                         if read.reference_start >= c_cursor:
-                            tracks_at_cursor = np.argwhere(track_ends < (c_cursor-(int(CURSOR_STRIDE/2)))).flatten()
-                            eligible_reads = [c_read for c_read in cursors[c_cursor] if c_read.reference_end > read.reference_start]
-                            chosen_reads = np.random.choice(eligible_reads, min(len(eligible_reads), len(tracks_at_cursor)), replace=False)
+                            tracks_at_cursor = np.argwhere(track_ends < c_cursor).flatten()
+                            #eligible_reads = [c_read for c_read in cursors[c_cursor] if c_read.reference_end > read.reference_start]
+                            chosen_reads = np.random.choice(cursors[c_cursor], min(len(cursors[c_cursor]), len(tracks_at_cursor)), replace=False)
 
                             read_i = -1
                             for read_i, chosen_read in enumerate(chosen_reads):
