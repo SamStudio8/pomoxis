@@ -213,7 +213,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     continue
 
                 # If in range of at least one cursor, randomly pick a close cursor to give this read to
-                if read.reference_start < closest_cursor and read.reference_end > closest_cursor:
+                if read.reference_start < closest_cursor and read.reference_end > closest_cursor + int(CURSOR_STRIDE/2):
                     #eligible_keys = []
                     #keys = list(cursors.keys())
                     #for c_n, c_i in enumerate(np.argsort(keys)):
