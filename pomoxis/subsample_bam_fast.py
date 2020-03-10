@@ -177,7 +177,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         bam = pysam.AlignmentFile(args.bam)
 
         # Begin cursor at region start
-        CURSOR_DIST = 500
+        CURSOR_DIST = 1000
         closest_cursor = region.start
         if closest_cursor == 0:
             closest_cursor += CURSOR_DIST
@@ -261,7 +261,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     # select the next_cursor, or 1 kbp from the current position
                     # opt for the smallest of the two, in case the next_cursor
                     # is very far away and will leave a big gap in coverage
-                    next_cursor = min(next_cursor, read.reference_start + 1000)
+                    next_cursor = min(next_cursor, read.reference_start + 2500)
 
                     for t_i, track_end in enumerate(track_ends):
                         if track_end <= read.reference_start:
