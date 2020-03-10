@@ -296,24 +296,6 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
         logger.info(u'region: {}, reads: {}, target: {}, depth: {:.0f}X (\u00B1{:.1f}).'.format(region.ref_name, n_reads, args.depth, median_depth, stdv_depth))
 
 
-def _nearest_overlapping_point(src, point):
-    """Find the interval with the closest start point to a given point.
-
-    :param src: IntervalTree instance.
-    :param point: query point.
-
-    :returns: Interval instance of interval with closest start.
-
-    """
-    items = src.at(point)
-    if len(items) == 0:
-        return None
-    items = sorted(items, key=lambda x: x.end - x.begin, reverse=True)
-    items.sort(key=lambda x: abs(x.begin - point))
-    return items[0]
-
-
-
 def _write_coverage(prefix, region, coverage, profile):
     # depth profile
     output = '{}_{}.depth'.format(prefix, region.ref_name)
