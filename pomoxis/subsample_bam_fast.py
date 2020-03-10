@@ -74,7 +74,6 @@ def main():
         p = Process(target=write_reads, args=(read_ret_q, args))
         processes.append(p)
     pp = Process(target=write_bam, args=(bam_ret_d, args))
-    processes.append(pp)
     for p in processes:
         p.start()
 
@@ -92,6 +91,7 @@ def main():
         p.join()
 
     # Write the BAM out (it's mp-ready, but uses one thread for now)
+    pp.start()
     pp.join()
 
 
@@ -155,8 +155,10 @@ def write_bam(uuid_d, args):
 
     # One-pass through BAM means the output should be sorted?
     for read in src_bam.fetch():
-        if "%s:%d" % (read.query_name, read.reference_start) in uuid_d:
+        s_read = "%s:%s:%d" % (read.reference_name, read.query_name, read.reference_start)
+        if s_read in uuid_d:
             out_bam.write(read)
+            del uuid_d[s_read]
     src_bam.close()
     out_bam.close()
 
@@ -236,7 +238,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     for c_i in np.argsort(keys):
                         c_cursor = keys[c_i]
                         if read.reference_start >= c_cursor:
-                            tracks_at_cursor = np.argwhere(track_ends < c_cursor).flatten()
+                            tracks_at_cursor = np.argwhere(track_ends < (c_cursor-(int(CURSOR_STRIDE/2)))).flatten()
                             eligible_reads = [c_read for c_read in cursors[c_cursor] if c_read.reference_end > read.reference_start]
                             chosen_reads = np.random.choice(eligible_reads, min(len(eligible_reads), len(tracks_at_cursor)), replace=False)
 
@@ -250,7 +252,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                                 track_cov[chosen_read.reference_start - region.start : chosen_read.reference_end - region.start] += 1
 
                                 seen_reads.add(chosen_read.query_name)
-                                bam_ret_d["%s:%d" % (chosen_read.query_name, chosen_read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
+                                bam_ret_d["%s:%s:%d" % (chosen_read.reference_name, chosen_read.query_name, chosen_read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
 
                                 if args.output_fasta:
                                     read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/fastq
