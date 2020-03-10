@@ -203,12 +203,16 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                 continue
 
             # If in range of at least one cursor, randomly pick a close cursor to give this read to
-            if read.reference_start >= closest_cursor-CURSOR_DIST and read.reference_start < closest_cursor:
+            #if read.reference_start >= closest_cursor-CURSOR_DIST and read.reference_start < closest_cursor:
+            #if read.reference_start < closest_cursor and read.reference_end > closest_cursor + 1000:
+            if read.reference_start < closest_cursor:
                 eligible_keys = []
                 keys = list(cursors.keys())
                 for c_i in np.argsort(keys):
                     c_cursor = keys[c_i]
-                    if read.reference_start >= c_cursor-CURSOR_DIST and read.reference_start < c_cursor:
+                    #if read.reference_start >= c_cursor-CURSOR_DIST and read.reference_start < c_cursor:
+                    #if read.reference_start < c_cursor and read.reference_end > c_cursor + 1000:
+                    if read.reference_start < c_cursor:
                         eligible_keys.append(c_i)
                 rand_i = np.random.choice(eligible_keys, 1)
                 cursors[keys[int(rand_i)]].append(read)
@@ -222,7 +226,8 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     c_cursor = keys[c_i]
                     if read.reference_start >= c_cursor:
                         tracks_at_cursor = np.argwhere(track_ends == c_cursor).flatten()
-                        chosen_reads = np.random.choice(cursors[c_cursor], min(len(cursors[c_cursor]), len(tracks_at_cursor)), replace=False)
+                        eligible_reads = [c_read for c_read in cursors[c_cursor] if c_read.reference_end > read.reference_start]
+                        chosen_reads = np.random.choice(eligible_reads, min(len(eligible_reads), len(tracks_at_cursor)), replace=False)
 
                         read_i = -1
                         for read_i, chosen_read in enumerate(chosen_reads):
@@ -262,6 +267,7 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                     # opt for the smallest of the two, in case the next_cursor
                     # is very far away and will leave a big gap in coverage
                     next_cursor = min(next_cursor, read.reference_start + 2500)
+#                    logger.info("Closest cursor moved by %d" % (closest_cursor - next_cursor))
 
                     for t_i, track_end in enumerate(track_ends):
                         if track_end <= read.reference_start:
