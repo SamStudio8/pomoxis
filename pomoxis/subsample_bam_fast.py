@@ -67,9 +67,8 @@ def main():
     for _ in range(args.threads):
         p = Process(target=subsample_region_uniformly, args=(work_queue, read_ret_q, args))
         processes.append(p)
-    if args.output_fasta:
-        p = Process(target=write_reads, args=(read_ret_q, args))
-        processes.append(p)
+    p = Process(target=write_reads, args=(read_ret_q, args))
+    processes.append(p)
     for p in processes:
         p.start()
 
@@ -123,26 +122,37 @@ def filter_read(r, bam, args, logger):
 
 
 def write_reads(read_q, args):
-    reads_fh = open(args.output_fasta, 'w')
     dead_threads = 0
 
     src_bam = pysam.AlignmentFile(args.bam, "rb")
     out_bam = pysam.AlignmentFile(args.output, "wb", template=src_bam)
 
-    while True:
-        read = read_q.get()
-        if read is None:
-            dead_threads += 1
-            if dead_threads == args.threads:
-                break
-            continue
+    if args.output_fasta:
+        reads_fh = open(args.output_fasta, 'w')
+        while True:
+            read = read_q.get()
+            if read is None:
+                dead_threads += 1
+                if dead_threads == args.threads:
+                    reads_fh.close()
+                    break
+                continue
 
-        # Write read (by parsing pysam AlignedSegment as str)
-        fields = read.split()
-        reads_fh.write(">%s\n%s\n" % (fields[0], fields[9]))
-        out_bam.write(pysam.AlignedSegment.fromstring(read, src_bam.header))
+            fields = read.split()
+            reads_fh.write(">%s\n%s\n" % (fields[0], fields[9]))
+            out_bam.write(pysam.AlignedSegment.fromstring(read, src_bam.header))
+    else:
+        while True:
+            read = read_q.get()
+            if read is None:
+                dead_threads += 1
+                if dead_threads == args.threads:
+                    break
+                continue
 
-    reads_fh.close()
+            # Write read (by parsing pysam AlignedSegment as str)
+            out_bam.write(pysam.AlignedSegment.fromstring(read, src_bam.header))
+
     src_bam.close()
     out_bam.close()
 
