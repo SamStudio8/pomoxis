@@ -2,7 +2,7 @@ import argparse
 import functools
 import logging
 import os
-from multiprocessing import cpu_count, Process, Queue, Manager
+from multiprocessing import cpu_count, Process, Queue
 
 from intervaltree import IntervalTree, Interval
 import numpy as np
@@ -64,16 +64,12 @@ def main():
     work_queue = Queue()
     read_ret_q = Queue()
 
-    manager = Manager()
-    bam_ret_d = manager.dict()
-
     for _ in range(args.threads):
-        p = Process(target=subsample_region_uniformly, args=(work_queue, bam_ret_d, read_ret_q, args))
+        p = Process(target=subsample_region_uniformly, args=(work_queue, read_ret_q, args))
         processes.append(p)
     if args.output_fasta:
         p = Process(target=write_reads, args=(read_ret_q, args))
         processes.append(p)
-    pp = Process(target=write_bam, args=(bam_ret_d, args))
     for p in processes:
         p.start()
 
@@ -89,10 +85,6 @@ def main():
     # Wait for threads to finish processing regions
     for p in processes:
         p.join()
-
-    # Write the BAM out (it's mp-ready, but uses one thread for now)
-    pp.start()
-    pp.join()
 
 
 def filter_read(r, bam, args, logger):
@@ -134,6 +126,9 @@ def write_reads(read_q, args):
     reads_fh = open(args.output_fasta, 'w')
     dead_threads = 0
 
+    src_bam = pysam.AlignmentFile(args.bam, "rb")
+    out_bam = pysam.AlignmentFile(args.output, "wb", template=src_bam)
+
     while True:
         read = read_q.get()
         if read is None:
@@ -145,25 +140,14 @@ def write_reads(read_q, args):
         # Write read (by parsing pysam AlignedSegment as str)
         fields = read.split()
         reads_fh.write(">%s\n%s\n" % (fields[0], fields[9]))
+        out_bam.write(pysam.AlignedSegment.fromstring(read, src_bam.header))
 
     reads_fh.close()
-
-
-def write_bam(uuid_d, args):
-    src_bam = pysam.AlignmentFile(args.bam, "rb")
-    out_bam = pysam.AlignmentFile(args.output, "wb", template=src_bam)
-
-    # One-pass through BAM means the output should be sorted?
-    for read in src_bam.fetch():
-        s_read = "%s:%s:%d" % (read.reference_name, read.query_name, read.reference_start)
-        if s_read in uuid_d:
-            out_bam.write(read)
-            del uuid_d[s_read]
     src_bam.close()
     out_bam.close()
 
 
-def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
+def subsample_region_uniformly(work_q, read_ret_q, args):
     while True:
         work = work_q.get()
         if work is None:
@@ -254,7 +238,6 @@ def subsample_region_uniformly(work_q, bam_ret_d, read_ret_q, args):
                                 track_cov[chosen_read.reference_start - region.start : chosen_read.reference_end - region.start] += 1
 
                                 seen_reads.add(chosen_read.query_name)
-                                bam_ret_d["%s:%s:%d" % (chosen_read.reference_name, chosen_read.query_name, chosen_read.reference_start)] = 1 # send read name to write to new BAM after all threads are done
 
                                 if args.output_fasta:
                                     read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/fastq
