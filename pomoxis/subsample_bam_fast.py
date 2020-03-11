@@ -248,9 +248,7 @@ def subsample_region_uniformly(work_q, read_ret_q, args):
                                 track_cov[chosen_read.reference_start - region.start : chosen_read.reference_end - region.start] += 1
 
                                 seen_reads.add(chosen_read.query_name)
-
-                                if args.output_fasta:
-                                    read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/fastq
+                                read_ret_q.put(chosen_read.to_string()) # send read data to be written to fasta/bam
 
                             del cursors[c_cursor] # drop the reads from the cursor watch
                         else:
